@@ -261,6 +261,20 @@ func (h *Host) watchAppState(name string) {
 }
 
 func (h *Host) StopApp(name string) error {
+	if name == "*" {
+		for _, app := range h.hostedApps {
+			h.Logger.Info("stopping app", "name", app.overseer_id)
+			if err := h.internalStopApp(app.overseer_id); err != nil {
+				h.Logger.Error("failed to stop app", "error", err)
+				continue
+			}
+		}
+		return nil
+	}
+	return h.internalStopApp(name)
+}
+
+func (h *Host) internalStopApp(name string) error {
 	app, ok := h.hostedApps[name]
 	if !ok {
 		return fmt.Errorf("app not found")

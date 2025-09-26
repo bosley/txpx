@@ -27,8 +27,7 @@ type ApplicationCandidate interface {
 		logger *slog.Logger,
 		rt AppRuntimeSetup,
 	) error
-	Run(ctx context.Context, rap AppRuntime)
-	Shutdown()
+	Main(ctx context.Context, rap AppRuntime)
 }
 
 /*
@@ -66,6 +65,8 @@ type AppRuntime interface {
 	GetSideCarPanel() AppSideCarPanel
 
 	Launch()
+
+	Shutdown()
 }
 
 /*
@@ -321,13 +322,13 @@ func (r *runtimeImpl) Launch() {
 	if r.sideCarBinder != nil {
 		r.internalSetupSideCar()
 	}
-	r.candidate.Run(r.ctx, r)
+	r.candidate.Main(r.ctx, r)
 }
 
 func (r *runtimeImpl) Shutdown() {
 	r.logger.Info("Shutting down application runtime")
+	r.cSideCar.host.StopApp("*")
 	r.cancel()
-	r.candidate.Shutdown()
 }
 
 func (r *runtimeImpl) internalSetupHttpServer() {

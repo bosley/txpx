@@ -13,8 +13,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"github.com/bosley/txpx/app"
@@ -89,7 +91,7 @@ func (d *DemoHttpsApp) Initialize(logger *slog.Logger, rt app.AppRuntimeSetup) e
 	return nil
 }
 
-func (d *DemoHttpsApp) Run(ctx context.Context, rap app.AppRuntime) {
+func (d *DemoHttpsApp) Main(ctx context.Context, rap app.AppRuntime) {
 
 	d.rt = rap
 
@@ -101,19 +103,23 @@ func (d *DemoHttpsApp) Run(ctx context.Context, rap app.AppRuntime) {
 	defer ticker.Stop()
 
 	for {
+		interrupt := make(chan os.Signal, 1)
+		signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
 		select {
 		case <-d.appCtx.Done():
 			return
 		case <-ctx.Done():
 			d.appCancel()
 			return
+		case <-interrupt:
+			d.appCancel()
+			d.logger.Info("shutting down")
+			d.rt.Shutdown()
+			return
 		case <-ticker.C:
 			d.logger.Debug("tick")
 		}
 	}
-}
-
-func (d *DemoHttpsApp) Shutdown() {
 }
 
 func NewDemoHttpsApp(binding string) *DemoHttpsApp {
