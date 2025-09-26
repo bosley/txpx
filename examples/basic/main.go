@@ -1,0 +1,134 @@
+package main
+
+import (
+	"context"
+	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/bosley/txpx/app"
+	"github.com/bosley/txpx/utils"
+	"github.com/fatih/color"
+)
+
+type DemoHttpsApp struct {
+	appCtx    context.Context
+	appCancel context.CancelFunc
+
+	binding    string
+	keysDir    string
+	installDir string
+
+	logger *slog.Logger
+
+	rt app.AppRuntime
+}
+
+var _ app.ApplicationCandidate = &DemoHttpsApp{}
+var _ app.AppHTTPBinder = &DemoHttpsApp{}
+
+// HTTP
+func (d *DemoHttpsApp) GetBinding() string {
+	return d.binding
+}
+
+func (d *DemoHttpsApp) GetCertPath() string {
+	return filepath.Join(d.keysDir, "cert.pem")
+}
+
+func (d *DemoHttpsApp) GetKeyPath() string {
+	return filepath.Join(d.keysDir, "key.pem")
+}
+
+func (d *DemoHttpsApp) BindPublicRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/", d.handleRootGet())
+}
+
+func (d *DemoHttpsApp) GetApiMountPoint() string {
+	return "/api"
+}
+
+func (d *DemoHttpsApp) Initialize(logger *slog.Logger, rt app.AppRuntimeSetup) error {
+
+	logger.Info("This is just the default logger. It wont be used in the app.")
+
+	// indicate we want to use Default log level
+	rt.WithLogLevel(slog.LevelDebug)
+
+	// indicate we want to use the install directory
+	rt.SetInstallPath(d.installDir)
+
+	// indicate we want to use the http server binder
+	rt.RequireHttpServer(d)
+	return nil
+}
+
+func (d *DemoHttpsApp) Run(ctx context.Context, rap app.AppRuntime) {
+
+	d.rt = rap
+
+	d.logger = rap.GetLogger("demo-https-app")
+
+	d.appCtx, d.appCancel = context.WithCancel(ctx)
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.appCtx.Done():
+			return
+		case <-ctx.Done():
+			d.appCancel()
+			return
+		case <-ticker.C:
+			d.logger.Debug("tick")
+		}
+	}
+}
+
+func (d *DemoHttpsApp) Shutdown() {
+}
+
+func NewDemoHttpsApp(binding string) *DemoHttpsApp {
+
+	installDir := os.TempDir()
+
+	keysDir := filepath.Join(installDir, "keys")
+	err := os.MkdirAll(keysDir, 0755)
+	if err != nil {
+		panic(err)
+	}
+
+	err = utils.GenerateSelfSignedCert(keysDir)
+	if err != nil {
+		panic(err)
+	}
+
+	return &DemoHttpsApp{
+		binding:    binding,
+		keysDir:    keysDir,
+		installDir: installDir,
+	}
+}
+
+func (d *DemoHttpsApp) handleRootGet() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Hello, World! - Current Auth Token: " + d.rt.GetHttpPanel().BumpAuthToken()))
+	}
+}
+
+func main() {
+	opt := app.New(NewDemoHttpsApp(":443"))
+
+	app := opt.UnwrapOrElse(func() app.AppRuntime {
+		color.HiRed("failed to create app")
+		os.Exit(1)
+		return nil
+	})
+
+	app.Launch()
+}
