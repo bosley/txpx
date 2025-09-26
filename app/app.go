@@ -96,7 +96,7 @@ instance of the current install path.
 */
 type AppFSPanel interface {
 	GetInstallPath() string
-	GetFS() xfs.FileStore
+	GetDataStore() xfs.DataStore
 }
 
 /*
@@ -109,7 +109,7 @@ type AppSideCarPanel interface {
 }
 
 type runtimeFSConcern struct {
-	fs          xfs.FileStore
+	fs          xfs.DataStore
 	installPath string
 }
 
@@ -119,7 +119,7 @@ func (r *runtimeFSConcern) GetInstallPath() string {
 	return r.installPath
 }
 
-func (r *runtimeFSConcern) GetFS() xfs.FileStore {
+func (r *runtimeFSConcern) GetDataStore() xfs.DataStore {
 	return r.fs
 }
 
@@ -295,7 +295,7 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 		logger:    logger.With("runtime", "app"),
 		candidate: candidate,
 		cFS: runtimeFSConcern{
-			fs:          xfs.NewFileStore(rts.installPath),
+			fs:          xfs.NewDataStore(logger, appRtCtx, rts.installPath),
 			installPath: rts.installPath,
 		},
 		workPool: pool.NewBuilder().WithLogger(logger).Build(appRtCtx),

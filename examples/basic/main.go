@@ -76,6 +76,28 @@ func (d *DemoHttpsApp) Run(ctx context.Context, rap app.AppRuntime) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	go func() {
+		time.Sleep(5 * time.Second)
+		color.HiCyan("setting system setting")
+
+		d.logger.Info("setting system setting")
+		result, err := d.rt.GetFSPanel().GetDataStore().SystemSettings().Set([]byte("hello"), []byte("world!"))
+		if err != nil {
+			d.logger.Error("error setting system setting", "error", err)
+		}
+		d.logger.Info("result", "result", result)
+
+		time.Sleep(5 * time.Second)
+		color.HiGreen("getting system setting")
+
+		d.logger.Info("getting system setting")
+		value, err := d.rt.GetFSPanel().GetDataStore().SystemSettings().Get([]byte("hello"))
+		if err != nil {
+			d.logger.Error("error getting system setting", "error", err)
+		}
+		d.logger.Info("value", "value", string(value))
+	}()
+
 	for {
 		select {
 		case <-d.appCtx.Done():
