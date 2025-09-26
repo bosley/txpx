@@ -2,24 +2,13 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
-	"sync"
-	"time"
 
 	"github.com/bosley/txpx/pkg/beau"
 	"github.com/bosley/txpx/pkg/pool"
 	"github.com/bosley/txpx/pkg/procman"
 	"github.com/bosley/txpx/pkg/xfs"
-	"github.com/google/uuid"
-)
-
-const (
-	HttpAuthorizationHeader = "txpx-app-authorization"
-	HttpMaxRestartAttempts  = 3
-	HttpRestartDelay        = 2 * time.Second
 )
 
 type ApplicationCandidate interface {
@@ -28,25 +17,6 @@ type ApplicationCandidate interface {
 		rt AppRuntimeSetup,
 	) error
 	Main(ctx context.Context, rap AppRuntime)
-}
-
-/*
-If an application needs HTTP/S they can indicate as such with the AppRuntimeSetup
-and they provide this. These function calls MUST be idempotent.
-
-If the server fails and needs to restart it will recreate the server, so
-the state of the callee of AppHTTPBinder MUST take this into account.
-*/
-type AppHTTPBinder interface {
-	GetBinding() string
-	GetCertPath() string
-	GetKeyPath() string
-	BindPublicRoutes(mux *http.ServeMux)
-	GetApiMountPoint() string // where they want the application api to be mounted
-}
-
-type AppExternalBinder interface {
-	BindProcman() *procman.Host // they provide us with a procman host
 }
 
 /*
@@ -63,6 +33,8 @@ type AppRuntime interface {
 	GetFSPanel() AppFSPanel
 
 	GetSideCarPanel() AppSideCarPanel
+
+	GetInsiPanel() AppInsiPanel
 
 	Launch()
 
@@ -88,111 +60,10 @@ type AppRuntimeSetup interface {
 	RequireSideCar(
 		sideCar AppExternalBinder,
 	)
-}
 
-/*
-The specific concerns for FS users
-When FS is indicated the panel can be offered to inform the application
-instance of the current install path.
-*/
-type AppFSPanel interface {
-	GetInstallPath() string
-	GetDataStore() xfs.DataStore
-}
-
-/*
-The specific concerns for SideCar users
-When SideCar is indicated the panel can be offered to inform the application
-instance of the procman host for managing sidecar processes.
-*/
-type AppSideCarPanel interface {
-	GetHost() *procman.Host
-}
-
-type runtimeFSConcern struct {
-	fs          xfs.DataStore
-	installPath string
-}
-
-var _ AppFSPanel = &runtimeFSConcern{}
-
-func (r *runtimeFSConcern) GetInstallPath() string {
-	return r.installPath
-}
-
-func (r *runtimeFSConcern) GetDataStore() xfs.DataStore {
-	return r.fs
-}
-
-/*
-The specific concerns for HTTP users
-When HTTP/s is indicated the panel can be offered to inform the application
-instance of the current token that the api endpoint will require to be used.
-*/
-type AppHttpPanel interface {
-	GetAuthorizationToken() string
-	BumpAuthToken() string
-	GetApiMountPoint() string
-}
-
-type runtimeHttpConcern struct {
-	currentAuthToken string
-	httpServerBinder AppHTTPBinder
-	apiMountPoint    string
-	httpServer       *http.Server
-	serverMu         sync.RWMutex
-
-	certPath string
-	keyPath  string
-}
-
-var _ AppHttpPanel = &runtimeHttpConcern{}
-
-func (r *runtimeHttpConcern) GetAuthorizationToken() string {
-	return r.currentAuthToken
-}
-
-func (r *runtimeHttpConcern) BumpAuthToken() string {
-	newToken := uuid.New().String()
-	r.currentAuthToken = newToken
-	return newToken
-}
-
-func (r *runtimeHttpConcern) GetApiMountPoint() string {
-	return r.apiMountPoint
-}
-
-func (r *runtimeHttpConcern) GetCertPath() string {
-	return r.certPath
-}
-
-func (r *runtimeHttpConcern) GetKeyPath() string {
-	return r.keyPath
-}
-
-func (r *runtimeHttpConcern) useTLS() (bool, error) {
-	r.serverMu.RLock()
-	defer r.serverMu.RUnlock()
-	if r.httpServer == nil {
-		return false, nil
-	}
-	if r.certPath == "" && r.keyPath != "" ||
-		r.certPath != "" && r.keyPath == "" {
-		return false, fmt.Errorf("certPath and keyPath must both be set or both be empty")
-	}
-	return r.certPath != "" && r.keyPath != "", nil
-}
-
-type runtimeSideCarConcern struct {
-	hostedApps map[string]*procman.HostedApp
-	mu         sync.RWMutex
-	host       *procman.Host
-}
-
-var _ AppSideCarPanel = &runtimeSideCarConcern{}
-
-func (r *runtimeSideCarConcern) GetHost() *procman.Host {
-	return r.host
+	RequireInsi(
+		insi AppInsiBinder,
+	)
 }
 
 type runtimeImpl struct {
@@ -209,6 +80,7 @@ type runtimeImpl struct {
 	cFS           runtimeFSConcern
 	cSideCar      runtimeSideCarConcern
 	sideCarBinder AppExternalBinder
+	cInsi         runtimeInsiConcern
 }
 
 var _ AppRuntime = &runtimeImpl{}
@@ -217,6 +89,7 @@ type runtimeSetupImpl struct {
 	installPath      string
 	httpServerBinder AppHTTPBinder
 	sideCarBinder    AppExternalBinder
+	insiBinder       AppInsiBinder
 	logLevel         slog.Level
 	certPath         string
 	keyPath          string
@@ -230,18 +103,6 @@ func (r *runtimeImpl) GetLogger(component string) *slog.Logger {
 
 func (r *runtimeImpl) GetWorkPool() *pool.Pool {
 	return r.workPool
-}
-
-func (r *runtimeImpl) GetHttpPanel() AppHttpPanel {
-	return &r.cHttp
-}
-
-func (r *runtimeImpl) GetFSPanel() AppFSPanel {
-	return &r.cFS
-}
-
-func (r *runtimeImpl) GetSideCarPanel() AppSideCarPanel {
-	return &r.cSideCar
 }
 
 func (r *runtimeSetupImpl) WithLogLevel(level slog.Level) {
@@ -264,6 +125,10 @@ func (r *runtimeSetupImpl) RequireHttpServer(binder AppHTTPBinder) {
 
 func (r *runtimeSetupImpl) RequireSideCar(sideCar AppExternalBinder) {
 	r.sideCarBinder = sideCar
+}
+
+func (r *runtimeSetupImpl) RequireInsi(insi AppInsiBinder) {
+	r.insiBinder = insi
 }
 
 func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
@@ -308,6 +173,18 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 			hostedApps: make(map[string]*procman.HostedApp),
 		},
 		sideCarBinder: rts.sideCarBinder,
+		cInsi: runtimeInsiConcern{
+			insiApiKey:    "",
+			insiEndpoints: nil,
+			logger:        logger.WithGroup("insi"),
+			skipVerify:    false,
+		},
+	}
+
+	if rts.insiBinder != nil {
+		runtimeActual.cInsi.insiApiKey = rts.insiBinder.GetInsiApiKey()
+		runtimeActual.cInsi.insiEndpoints = rts.insiBinder.GetInsiEndpoints()
+		runtimeActual.cInsi.skipVerify = rts.insiBinder.GetInsiSkipVerify()
 	}
 
 	opt := beau.Some(AppRuntime(runtimeActual))
@@ -322,6 +199,9 @@ func (r *runtimeImpl) Launch() {
 	if r.sideCarBinder != nil {
 		r.internalSetupSideCar()
 	}
+	if r.cInsi.insiApiKey != "" && r.cInsi.insiEndpoints != nil {
+		r.internalSetupInsi()
+	}
 	r.candidate.Main(r.ctx, r)
 }
 
@@ -332,133 +212,4 @@ func (r *runtimeImpl) Shutdown() {
 		r.cSideCar.host.StopApp("*")
 	}
 	r.cancel()
-}
-
-func (r *runtimeImpl) internalSetupHttpServer() {
-
-	buildServer := func() {
-		r.cHttp.serverMu.Lock()
-		defer r.cHttp.serverMu.Unlock()
-
-		if r.cHttp.httpServer != nil {
-			r.cHttp.httpServer.Shutdown(r.ctx)
-			r.cHttp.httpServer = nil
-		}
-
-		mux := http.NewServeMux()
-
-		r.cHttp.apiMountPoint = r.cHttp.httpServerBinder.GetApiMountPoint()
-
-		r.cHttp.certPath = r.cHttp.httpServerBinder.GetCertPath()
-		r.cHttp.keyPath = r.cHttp.httpServerBinder.GetKeyPath()
-
-		r.cHttp.httpServerBinder.BindPublicRoutes(mux)
-
-		r.cHttp.httpServer = &http.Server{
-			Addr:    r.cHttp.httpServerBinder.GetBinding(),
-			Handler: mux,
-		}
-	}
-
-	startServer := func() error {
-		servingTLS, err := r.cHttp.useTLS()
-		if err != nil {
-			r.logger.Error("Error building http server; invalid TLS configuration", "error", err)
-			return nil
-		}
-
-		r.cHttp.serverMu.RLock()
-		defer r.cHttp.serverMu.RUnlock()
-
-		if r.cHttp.httpServer == nil {
-			return fmt.Errorf("http server not built")
-		}
-
-		if servingTLS {
-			return r.cHttp.httpServer.ListenAndServeTLS(r.cHttp.certPath, r.cHttp.keyPath)
-		}
-		return r.cHttp.httpServer.ListenAndServe()
-	}
-
-	/*
-		Build the server, and then start it
-	*/
-	buildServer()
-
-	go func() {
-
-		r.cHttp.serverMu.RLock()
-		addr := r.cHttp.httpServer.Addr
-		r.cHttp.serverMu.RUnlock()
-
-		// Here we know TLS was good once if it was ever good. If it changes thats bad and Mfn takes care of that
-		r.logger.Info("Starting http server", "address", addr, "tls", beau.MFn[bool](r.cHttp.useTLS))
-
-		restartCount := 0
-
-		for {
-			select {
-			case <-r.ctx.Done():
-				r.cHttp.serverMu.RLock()
-				addr := r.cHttp.httpServer.Addr
-				server := r.cHttp.httpServer
-				r.cHttp.serverMu.RUnlock()
-
-				r.logger.Info("Shutting down http server", "address", addr)
-				if err := server.Shutdown(r.ctx); err != nil {
-					r.logger.Error("Error shutting down http server", "error", err)
-				}
-				return
-			default:
-				err := startServer()
-				if r.ctx.Err() != nil {
-					r.cHttp.serverMu.RLock()
-					addr := r.cHttp.httpServer.Addr
-					r.cHttp.serverMu.RUnlock()
-					r.logger.Info("Http server stopped due to context cancellation", "address", addr)
-					return
-				}
-
-				r.cHttp.serverMu.RLock()
-				addr := r.cHttp.httpServer.Addr
-				r.cHttp.serverMu.RUnlock()
-				r.logger.Error("Http server died unexpectedly", "error", err, "address", addr)
-
-				restartCount++
-				if restartCount >= HttpMaxRestartAttempts {
-					r.cHttp.serverMu.RLock()
-					addr := r.cHttp.httpServer.Addr
-					r.cHttp.serverMu.RUnlock()
-					r.logger.Error("Http server failed to restart after maximum attempts", "attempts", restartCount, "address", addr)
-					r.OnError(fmt.Errorf("http server failed after %d restart attempts: %w", restartCount, err))
-					return
-				}
-
-				r.cHttp.serverMu.RLock()
-				addr = r.cHttp.httpServer.Addr
-				r.cHttp.serverMu.RUnlock()
-				r.logger.Info("Attempting to restart http server", "attempt", restartCount, "max_attempts", HttpMaxRestartAttempts, "delay", HttpRestartDelay)
-
-				select {
-				case <-time.After(HttpRestartDelay):
-					// Continue to restart
-				case <-r.ctx.Done():
-					r.cHttp.serverMu.RLock()
-					addr = r.cHttp.httpServer.Addr
-					r.cHttp.serverMu.RUnlock()
-					r.logger.Info("Aborting server restart due to context cancellation", "address", addr)
-					return
-				}
-
-				/*
-					Rebuild the server
-				*/
-				buildServer()
-			}
-		}
-	}()
-}
-
-func (r *runtimeImpl) internalSetupSideCar() {
-	r.cSideCar.host = r.sideCarBinder.BindProcman()
 }
