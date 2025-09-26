@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/bosley/txpx/app"
-	"github.com/bosley/txpx/utils"
+	"github.com/bosley/txpx/pkg/security"
 	"github.com/fatih/color"
 )
 
@@ -102,7 +102,7 @@ func NewDemoHttpsApp(binding string) *DemoHttpsApp {
 		panic(err)
 	}
 
-	err = utils.GenerateSelfSignedCert(keysDir)
+	err = security.GenerateSelfSignedCert(keysDir)
 	if err != nil {
 		panic(err)
 	}

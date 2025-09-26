@@ -1,4 +1,4 @@
-module github.com/bosley/txpx/examples/basic
+module github.com/bosley/txpx/examples/sidecar
 
 go 1.24.4
 

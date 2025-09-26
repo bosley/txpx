@@ -9,9 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bosley/txpx/beau"
-	"github.com/bosley/txpx/utils/pool"
-	"github.com/bosley/txpx/xfs"
+	"github.com/bosley/txpx/pkg/beau"
+	"github.com/bosley/txpx/pkg/pool"
+	"github.com/bosley/txpx/pkg/procman"
+	"github.com/bosley/txpx/pkg/xfs"
 	"github.com/google/uuid"
 )
 
@@ -45,6 +46,10 @@ type AppHTTPBinder interface {
 	GetApiMountPoint() string // where they want the application api to be mounted
 }
 
+type AppExternalBinder interface {
+	BindProcman() *procman.Host // they provide us with a procman host
+}
+
 /*
 The actuall application runtime that offers controls over the various operational stacks
 */
@@ -57,6 +62,8 @@ type AppRuntime interface {
 	GetHttpPanel() AppHttpPanel
 
 	GetFSPanel() AppFSPanel
+
+	GetSideCarPanel() AppSideCarPanel
 
 	Launch()
 }
@@ -76,6 +83,10 @@ type AppRuntimeSetup interface {
 	RequireHttpServer(
 		binder AppHTTPBinder,
 	)
+
+	RequireSideCar(
+		sideCar AppExternalBinder,
+	)
 }
 
 /*
@@ -86,6 +97,15 @@ instance of the current install path.
 type AppFSPanel interface {
 	GetInstallPath() string
 	GetFS() xfs.FileStore
+}
+
+/*
+The specific concerns for SideCar users
+When SideCar is indicated the panel can be offered to inform the application
+instance of the procman host for managing sidecar processes.
+*/
+type AppSideCarPanel interface {
+	GetHost() *procman.Host
 }
 
 type runtimeFSConcern struct {
@@ -162,6 +182,18 @@ func (r *runtimeHttpConcern) useTLS() (bool, error) {
 	return r.certPath != "" && r.keyPath != "", nil
 }
 
+type runtimeSideCarConcern struct {
+	hostedApps map[string]*procman.HostedApp
+	mu         sync.RWMutex
+	host       *procman.Host
+}
+
+var _ AppSideCarPanel = &runtimeSideCarConcern{}
+
+func (r *runtimeSideCarConcern) GetHost() *procman.Host {
+	return r.host
+}
+
 type runtimeImpl struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -172,8 +204,10 @@ type runtimeImpl struct {
 
 	candidate ApplicationCandidate
 
-	cHttp runtimeHttpConcern
-	cFS   runtimeFSConcern
+	cHttp         runtimeHttpConcern
+	cFS           runtimeFSConcern
+	cSideCar      runtimeSideCarConcern
+	sideCarBinder AppExternalBinder
 }
 
 var _ AppRuntime = &runtimeImpl{}
@@ -181,6 +215,7 @@ var _ AppRuntime = &runtimeImpl{}
 type runtimeSetupImpl struct {
 	installPath      string
 	httpServerBinder AppHTTPBinder
+	sideCarBinder    AppExternalBinder
 	logLevel         slog.Level
 	certPath         string
 	keyPath          string
@@ -204,6 +239,10 @@ func (r *runtimeImpl) GetFSPanel() AppFSPanel {
 	return &r.cFS
 }
 
+func (r *runtimeImpl) GetSideCarPanel() AppSideCarPanel {
+	return &r.cSideCar
+}
+
 func (r *runtimeSetupImpl) WithLogLevel(level slog.Level) {
 	r.logLevel = level
 }
@@ -220,6 +259,10 @@ func (r *runtimeSetupImpl) SetInstallPath(path string) {
 
 func (r *runtimeSetupImpl) RequireHttpServer(binder AppHTTPBinder) {
 	r.httpServerBinder = binder
+}
+
+func (r *runtimeSetupImpl) RequireSideCar(sideCar AppExternalBinder) {
+	r.sideCarBinder = sideCar
 }
 
 func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
@@ -260,6 +303,10 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 			httpServerBinder: rts.httpServerBinder,
 			currentAuthToken: "",
 		},
+		cSideCar: runtimeSideCarConcern{
+			hostedApps: make(map[string]*procman.HostedApp),
+		},
+		sideCarBinder: rts.sideCarBinder,
 	}
 
 	opt := beau.Some(AppRuntime(runtimeActual))
@@ -270,6 +317,9 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 func (r *runtimeImpl) Launch() {
 	if r.cHttp.httpServerBinder != nil {
 		r.internalSetupHttpServer()
+	}
+	if r.sideCarBinder != nil {
+		r.internalSetupSideCar()
 	}
 	r.candidate.Run(r.ctx, r)
 }
@@ -403,4 +453,8 @@ func (r *runtimeImpl) internalSetupHttpServer() {
 			}
 		}
 	}()
+}
+
+func (r *runtimeImpl) internalSetupSideCar() {
+	r.cSideCar.host = r.sideCarBinder.BindProcman()
 }
