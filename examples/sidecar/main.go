@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bosley/txpx/app"
+	"github.com/bosley/txpx/pkg/app"
 	"github.com/bosley/txpx/pkg/procman"
 	"github.com/bosley/txpx/pkg/security"
 	"github.com/fatih/color"
