@@ -327,7 +327,10 @@ func (r *runtimeImpl) Launch() {
 
 func (r *runtimeImpl) Shutdown() {
 	r.logger.Info("Shutting down application runtime")
-	r.cSideCar.host.StopApp("*")
+
+	if r.cSideCar.host != nil {
+		r.cSideCar.host.StopApp("*")
+	}
 	r.cancel()
 }
 
