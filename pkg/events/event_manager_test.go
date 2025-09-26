@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -253,9 +254,209 @@ func TestEventManagerConcurrentOperations(t *testing.T) {
 	topicCount := em.TopicCount()
 	t.Logf("Created %d topics under concurrent load", topicCount)
 
-	userTopics := topicCount - 8 // sys topics
+	userTopics := topicCount
 	if userTopics > numTopics {
 		t.Errorf("Too many user topics created: %d > %d (total topics: %d, including 8 system topics)",
 			userTopics, numTopics, topicCount)
 	}
+}
+
+func TestEventManagerThrottleThroughput(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultEventManagerConfig(slog.Default())
+	em := NewEventManager(ctx, config)
+
+	topicName := "throttle-throughput-test"
+	if err := em.RegisterTopic(topicName); err != nil {
+		t.Fatalf("Failed to register topic: %v", err)
+	}
+
+	pub, err := em.GetTopicPublisher(topicName)
+	if err != nil {
+		t.Fatalf("Failed to get publisher: %v", err)
+	}
+
+	const testDuration = 10 * time.Second
+	const numHandlers = 100
+
+	// Realistic handler that emulates work with random delays
+	type realisticHandler struct {
+		received int64
+		id       string
+		minSleep time.Duration
+		maxSleep time.Duration
+	}
+
+	// Create handlers with different work characteristics
+	handlers := make([]*realisticHandler, numHandlers)
+	handlerWrappers := make([]EventHandler, numHandlers)
+
+	for i := 0; i < numHandlers; i++ {
+		// Mix of fast, medium, and slow handlers
+		var minSleep, maxSleep time.Duration
+		switch i % 3 {
+		case 0: // Fast handlers
+			minSleep = 0 * time.Millisecond
+			maxSleep = 5 * time.Millisecond
+		case 1: // Medium handlers
+			minSleep = 5 * time.Millisecond
+			maxSleep = 20 * time.Millisecond
+		case 2: // Slow handlers
+			minSleep = 20 * time.Millisecond
+			maxSleep = 50 * time.Millisecond
+		}
+
+		handlers[i] = &realisticHandler{
+			id:       fmt.Sprintf("handler-%d", i),
+			minSleep: minSleep,
+			maxSleep: maxSleep,
+		}
+
+		// Create proper EventHandler wrapper
+		h := handlers[i]
+		handlerWrappers[i] = EventHandlerFunc(func(event Event) {
+			sleepTime := h.minSleep + time.Duration(rand.Int63n(int64(h.maxSleep-h.minSleep)))
+			time.Sleep(sleepTime)
+			atomic.AddInt64(&h.received, 1)
+		})
+
+		if _, err := em.AddHandler(topicName, handlerWrappers[i]); err != nil {
+			t.Fatalf("Failed to add handler: %v", err)
+		}
+	}
+
+	// Small, medium, and large message sizes
+	messageSizes := map[string][]byte{
+		"small":  make([]byte, 64),    // 64 bytes
+		"medium": make([]byte, 1024),  // 1KB
+		"large":  make([]byte, 10240), // 10KB
+	}
+
+	// Fill messages with data
+	rand.Read(messageSizes["small"])
+	rand.Read(messageSizes["medium"])
+	rand.Read(messageSizes["large"])
+
+	var eventsPublished int64
+	var eventsReceived int64
+
+	start := time.Now()
+
+	// Publisher goroutine with mixed message sizes
+	go func() {
+		messageTypes := []string{"small", "medium", "large"}
+		for {
+			if time.Since(start) >= testDuration {
+				break
+			}
+
+			// Random message size
+			msgType := messageTypes[rand.Intn(len(messageTypes))]
+
+			event := Event{
+				Header: [4]byte{'S', 'M', 'L', byte(msgType[0])},
+				Body:   messageSizes[msgType],
+			}
+
+			pub.Publish(event)
+			atomic.AddInt64(&eventsPublished, 1)
+		}
+	}()
+
+	// Wait for the test duration plus buffer for processing
+	time.Sleep(testDuration + 500*time.Millisecond)
+
+	// Count received events
+	for _, h := range handlers {
+		received := atomic.LoadInt64(&h.received)
+		atomic.AddInt64(&eventsReceived, received)
+	}
+
+	published := atomic.LoadInt64(&eventsPublished)
+	received := atomic.LoadInt64(&eventsReceived)
+
+	throughputPublished := float64(published) / testDuration.Seconds()
+	throughputReceived := float64(received) / testDuration.Seconds()
+
+	t.Logf("=== Realistic Throttle Throughput Test Results ===")
+	t.Logf("Test Duration: %v", testDuration)
+	t.Logf("Handlers: %d (mixed fast/medium/slow)", numHandlers)
+	t.Logf("Message Sizes: small(64B), medium(1KB), large(10KB)")
+	t.Logf("Events Published: %d", published)
+	t.Logf("Events Received: %d", received)
+	t.Logf("Published Throughput: %.2f events/sec", throughputPublished)
+	t.Logf("Received Throughput: %.2f events/sec", throughputReceived)
+
+	if published != received {
+		loss := published - received
+		lossPercent := float64(loss) / float64(published) * 100
+		t.Logf("Event loss: %d events (%.2f%%)", loss, lossPercent)
+	}
+
+	// Log per-handler stats
+	t.Logf("=== Per-Handler Stats ===")
+	for i, h := range handlers {
+		received := atomic.LoadInt64(&h.received)
+		fastType := "fast"
+		if i%3 == 1 {
+			fastType = "medium"
+		} else if i%3 == 2 {
+			fastType = "slow"
+		}
+		t.Logf("Handler %s (%s): %d events", h.id, fastType, received)
+	}
+}
+
+// EventHandlerFunc is a function type that implements EventHandler
+type EventHandlerFunc func(event Event)
+
+func (f EventHandlerFunc) OnEvent(event Event) {
+	f(event)
+}
+
+func BenchmarkEventManagerThrottleThroughput(b *testing.B) {
+	ctx := context.Background()
+	config := DefaultEventManagerConfig(slog.Default())
+	em := NewEventManager(ctx, config)
+
+	topicName := "benchmark-throttle"
+	if err := em.RegisterTopic(topicName); err != nil {
+		b.Fatalf("Failed to register topic: %v", err)
+	}
+
+	pub, err := em.GetTopicPublisher(topicName)
+	if err != nil {
+		b.Fatalf("Failed to get publisher: %v", err)
+	}
+
+	handler := &testHandler{}
+	if _, err := em.AddHandler(topicName, handler); err != nil {
+		b.Fatalf("Failed to add handler: %v", err)
+	}
+
+	event := Event{
+		Header: [4]byte{'B', 'T', 'H', 'R'},
+		Body:   "benchmark-throttle-payload",
+	}
+
+	b.ResetTimer()
+
+	var totalEvents int64
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			pub.Publish(event)
+			atomic.AddInt64(&totalEvents, 1)
+		}
+	})
+
+	b.StopTimer()
+
+	// Allow time for all events to be processed
+	time.Sleep(100 * time.Millisecond)
+
+	received := atomic.LoadInt64(&handler.received)
+	throughput := float64(received) / b.Elapsed().Seconds()
+
+	b.ReportMetric(throughput, "events/sec")
+	b.Logf("Total published: %d, Total received: %d", totalEvents, received)
 }

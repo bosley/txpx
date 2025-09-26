@@ -89,17 +89,6 @@ func NewEventManager(ctx context.Context, config *EventManagerConfig) *EventMana
 		}
 	}
 
-	systemTopics := map[string]int{
-		"system-flag":      0,
-		"system-reserved0": 1,
-		"system-reserved1": 2,
-		"system-reserved2": 3,
-		"system-reserved3": 4,
-		"system-reserved4": 5,
-		"system-reserved5": 6,
-		"system-reserved6": 7,
-	}
-
 	workerPool := pool.NewBuilder().
 		WithLogger(config.Logger).
 		WithWorkers(config.WorkerPoolSize).
@@ -110,14 +99,10 @@ func NewEventManager(ctx context.Context, config *EventManagerConfig) *EventMana
 		logger:       config.Logger,
 		topics:       topics,
 		knownTopics:  make(map[string]int),
-		topicCounter: int32(len(systemTopics)),
+		topicCounter: int32(0),
 		ctx:          ctx,
 		workerPool:   workerPool,
-		systemTopics: systemTopics,
-	}
-
-	for name, id := range systemTopics {
-		em.knownTopics[name] = id
+		systemTopics: make(map[string]int),
 	}
 
 	return em
