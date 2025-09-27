@@ -1,7 +1,5 @@
 package main
 
-import "time"
-
 const (
 	EventTopicTxPxSystem     = "txpx-system"
 	EventTopicTxPxMainApp    = "txpx-main-app"
@@ -36,25 +34,17 @@ const (
 )
 
 const (
+	SpecificEventIdentifier_SystemBeginInclusive = 0  // Start of system events reserved range
+	SpecificEventIdentifier_SystemEndExclusive   = 32 // End of system events reserved range
+
+	// TODO: Other category specific identifiers
+
+	SpecificEventIdentifier_ExternalBeginInclusive = 128 // Start of external events reserved range
+	SpecificEventIdentifier_ExternalEndExclusive   = 255 // End of external events reserved range
+
+)
+
+const (
 	ConfigFileClusterDefault = "cluster.yaml"
 	ConfigFileSiteDefault    = "site.yaml"
 )
-
-func ConstructEventHeader(importance int, threadOrigin int, specificEventIdentifier int) [4]byte {
-	return [4]byte{byte(importance), byte(threadOrigin), byte(specificEventIdentifier), 0}
-}
-
-type SystemEventIdentifier int
-
-const (
-	SystemEventIdentifierInsiOnline  SystemEventIdentifier = 0
-	SystemEventIdentifierInsiOffline SystemEventIdentifier = 1
-)
-
-type EventInsiOnline struct {
-	PingData map[string]string
-}
-
-type EventInsiOffline struct {
-	At time.Time
-}
