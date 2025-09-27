@@ -25,7 +25,6 @@ type Config struct {
 	URL            string                 `yaml:"url"`
 	Port           int                    `yaml:"port"`
 	HTTPS          bool                   `yaml:"https"`
-	ForwardHTTP    bool                   `yaml:"forward_http"`
 	KeyPath        string                 `yaml:"key_path"`
 	CertPath       string                 `yaml:"cert_path"`
 	Secret         string                 `yaml:"secret"`
@@ -74,13 +73,6 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("cert file does not exist: %s", config.CertPath)
 		}
 
-		if config.ForwardHTTP && config.Port == 443 {
-			return nil, fmt.Errorf("cannot forward HTTP when using port 443 for HTTPS")
-		}
-	} else {
-		if config.ForwardHTTP {
-			return nil, fmt.Errorf("forward_http cannot be enabled when https is disabled")
-		}
 	}
 
 	if config.Secret == "" {
