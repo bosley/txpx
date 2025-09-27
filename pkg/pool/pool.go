@@ -75,12 +75,12 @@ func (p *Pool) worker(id int) {
 	defer p.wg.Done()
 
 	logger := p.logger.With("worker", id)
-	logger.Info("worker started")
+	logger.Debug("worker started")
 
 	for {
 		select {
 		case <-p.ctx.Done():
-			logger.Info("worker shutting down")
+			logger.Debug("worker shutting down")
 			return
 		case job := <-p.jobQueue:
 			p.executeJob(logger, job)
