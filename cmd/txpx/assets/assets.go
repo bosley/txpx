@@ -14,6 +14,8 @@ func GetConfiguration(name string) ([]byte, error) {
 	switch name {
 	case "cluster", "cluster.yaml":
 		return configurations.ReadFile(path)
+	case "site", "site.yaml":
+		return configurations.ReadFile(path)
 	default:
 		return nil, fmt.Errorf("configuration not found: %s", name)
 	}

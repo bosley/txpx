@@ -2,38 +2,92 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
 
 	"github.com/InsulaLabs/insi/runtime"
+	"github.com/bosley/txpx/pkg/app"
 	"github.com/fatih/color"
+	"github.com/google/uuid"
 )
 
 func main() {
+	var (
+		nodeID     = flag.String("as", "", "Node ID to run as (e.g., node0). Mutually exclusive with --host.")
+		hostAll    = flag.Bool("host", false, "Run instances for all nodes in the config. Mutually exclusive with --as.")
+		configPath = flag.String("config", "", "Path to the cluster configuration file.")
+	)
+	flag.Parse()
 
-	appCtx, appCancel := context.WithCancel(context.Background())
-	defer appCancel()
-
-	args := os.Args[1:]
-
-	if len(args) == 0 {
-		color.HiRed("no arguments provided")
+	if *hostAll && *nodeID != "" {
+		color.HiRed("Error: --host and --as flags are mutually exclusive")
 		os.Exit(1)
 	}
 
-	// Process app-sepcific args (if any) and then ensure all are removed if not related to insid
+	instanceId := uuid.New().String()
 
-	go insid(appCtx, args)
+	txpxApp := NewAppTxPx(fmt.Sprintf("txpx-%s", instanceId))
+
+	var insidArgs []string
+
+	if *configPath != "" {
+		insidArgs = append(insidArgs, "--config", *configPath)
+	} else {
+		insidArgs = append(insidArgs, "--config", filepath.Join(
+			txpxApp.GetInstallDir(),
+			ConfigFileClusterDefault,
+		))
+	}
+
+	if *hostAll {
+		insidArgs = append(insidArgs, "--host")
+	} else if *nodeID != "" {
+		insidArgs = append(insidArgs, "--as", *nodeID)
+	} else {
+		color.HiRed("Error: --host or --as flag is required")
+		os.Exit(1)
+	}
+
+	if txpxApp.config.Prod {
+		insidArgs = append(insidArgs, "--prod")
+	}
+
+	opt := app.New(txpxApp)
+
+	application := opt.UnwrapOrElse(func() app.AppRuntime {
+		color.HiRed("failed to create app")
+		os.Exit(1)
+		return nil
+	})
+
+	application.Launch()
+
+	go insid(txpxApp.appCtx, insidArgs)
+
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
 	select {
-	case <-appCtx.Done():
+	case <-txpxApp.appCtx.Done():
+		if application == nil {
+			return
+		}
+		application.Shutdown()
+		return
+	case <-signalChan:
+		if application == nil {
+			return
+		}
+		application.Shutdown()
 		return
 	}
-}
-
-func showHelp() {
 }
 
 // This is the entire main for insid. We need to start our app with http and an insi client,

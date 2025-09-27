@@ -14,6 +14,8 @@ import (
 )
 
 type DemoInsiApp struct {
+	startTime time.Time
+
 	appCtx    context.Context
 	appCancel context.CancelFunc
 
@@ -159,11 +161,24 @@ func NewDemoInsiApp() *DemoInsiApp {
 	}
 
 	return &DemoInsiApp{
+		startTime:  time.Now(),
 		installDir: installDir,
 		apiKey:     apiKey,
 		endpoints:  endpoints,
 		skipVerify: skipVerify,
 	}
+}
+
+func (d *DemoInsiApp) GetAppMeta() app.AppMetaStat {
+	return d
+}
+
+func (d *DemoInsiApp) GetIdentifier() string {
+	return d.installDir
+}
+
+func (d *DemoInsiApp) GetUptime() time.Duration {
+	return time.Since(d.startTime)
 }
 
 func main() {

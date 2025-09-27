@@ -36,11 +36,12 @@ func (r *runtimeInsiConcern) GetInsiClient() *client.Client {
 	}
 	var err error
 	r.insiClient, err = client.NewClient(&client.Config{
-		ConnectionType: client.ConnectionTypeDirect,
-		Endpoints:      r.insiEndpoints,
-		ApiKey:         r.insiApiKey,
-		SkipVerify:     r.skipVerify,
-		Logger:         r.logger,
+		ConnectionType:         client.ConnectionTypeRandom,
+		Endpoints:              r.insiEndpoints,
+		ApiKey:                 r.insiApiKey,
+		SkipVerify:             r.skipVerify,
+		Logger:                 r.logger,
+		EnableLeaderStickiness: true,
 	})
 	if err != nil {
 		r.logger.Error("Failed to create Insi client", "error", err)
