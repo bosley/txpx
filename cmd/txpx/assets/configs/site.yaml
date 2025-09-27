@@ -1,0 +1,42 @@
+prod: false
+
+domain: "localhost" # defaults to localhost if not provided
+url: "https://example.com" # defaults to https://<domain>
+port: 8080 # defaults to 8080 if not provided
+
+https: false
+
+# Ignored if https is false, forwards http to https otherwise (keys must be provided, valid, and https is true)
+forward_http: false
+
+# Ignored if https is false
+key_path: "/tmp/txpx/site.key"
+cert_path: "/tmp/txpx/site.cert"
+
+secret: "some-web-app-secret"
+
+admin_emails:
+  - "admin@example.com"
+
+permitted_ips: # can be used to restrict access to the web app (all requests must come from an ip in this list)
+  - "127.0.0.1"
+  - "::1"
+  - "*"
+
+trusted_proxies: # can be used to trust proxies (all requests must come from a proxy in this list [if app is in cluster mode and is auto balancing])
+  - "127.0.0.1"
+  - "::1"
+  - "*"
+
+# Web cache/rate limiting settings
+cache:
+  standard_ttl: 60m
+  keys: 1m
+
+rate_limiters:
+  default:
+    limit: 5
+    burst: 10
+  authorized_users:
+    limit: 100
+    burst: 150
