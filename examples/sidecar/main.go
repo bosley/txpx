@@ -38,11 +38,25 @@ type DemoHttpsApp struct {
 	rt app.AppRuntime
 
 	sidecarAppName string
+	startTime      time.Time
 }
 
 var _ app.ApplicationCandidate = &DemoHttpsApp{}
 var _ app.AppHTTPBinder = &DemoHttpsApp{}
 var _ app.AppExternalBinder = &DemoHttpsApp{}
+var _ app.AppMetaStat = &DemoHttpsApp{}
+
+func (d *DemoHttpsApp) GetAppMeta() app.AppMetaStat {
+	return d
+}
+
+func (d *DemoHttpsApp) GetIdentifier() string {
+	return d.binding
+}
+
+func (d *DemoHttpsApp) GetUptime() time.Duration {
+	return time.Since(d.startTime)
+}
 
 // HTTP
 func (d *DemoHttpsApp) GetBinding() string {
@@ -141,6 +155,7 @@ func NewDemoHttpsApp(binding string) *DemoHttpsApp {
 		binding:    binding,
 		keysDir:    keysDir,
 		installDir: installDir,
+		startTime:  time.Now(),
 	}
 }
 

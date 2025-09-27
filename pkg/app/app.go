@@ -2,20 +2,31 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/bosley/txpx/pkg/beau"
+	"github.com/bosley/txpx/pkg/events"
 	"github.com/bosley/txpx/pkg/pool"
 	"github.com/bosley/txpx/pkg/procman"
 	"github.com/bosley/txpx/pkg/xfs"
 )
+
+type AppMetaStat interface {
+	GetIdentifier() string // Must be unique to all instances across all processes - this is how we specificly event-to-from each other
+	GetUptime() time.Duration
+}
 
 type ApplicationCandidate interface {
 	Initialize(
 		logger *slog.Logger,
 		rt AppRuntimeSetup,
 	) error
+
+	GetAppMeta() AppMetaStat
+
 	Main(ctx context.Context, rap AppRuntime)
 }
 
@@ -35,6 +46,8 @@ type AppRuntime interface {
 	GetSideCarPanel() AppSideCarPanel
 
 	GetInsiPanel() AppInsiPanel
+
+	GetEventsPanel() AppEventsPanel
 
 	Launch()
 
@@ -64,7 +77,20 @@ type AppRuntimeSetup interface {
 	RequireInsi(
 		insi AppInsiBinder,
 	)
+
+	ListenOn(topic string, handler events.EventHandler)
 }
+
+type AppEventsPanel interface {
+	GetTopicPublisher(topic string) (events.TopicPublisher, error)
+}
+
+type runtimeEventsConcern struct {
+	events       *events.EventManager
+	activeTopics map[string]string // topic handler id -> topic name
+}
+
+var _ AppEventsPanel = &runtimeEventsConcern{}
 
 type runtimeImpl struct {
 	ctx    context.Context
@@ -81,6 +107,7 @@ type runtimeImpl struct {
 	cSideCar      runtimeSideCarConcern
 	sideCarBinder AppExternalBinder
 	cInsi         runtimeInsiConcern
+	cEvents       runtimeEventsConcern
 }
 
 var _ AppRuntime = &runtimeImpl{}
@@ -93,9 +120,34 @@ type runtimeSetupImpl struct {
 	logLevel         slog.Level
 	certPath         string
 	keyPath          string
+	requestedTopics  map[string]events.EventHandler
 }
 
 var _ AppRuntimeSetup = &runtimeSetupImpl{}
+
+type dummyEventsPanel struct {
+}
+
+func (d *dummyEventsPanel) GetTopicPublisher(topic string) (events.TopicPublisher, error) {
+	return nil, fmt.Errorf("events panel not initialized; were any topics requested?")
+}
+
+func (r *runtimeImpl) GetEventsPanel() AppEventsPanel {
+	if r.cEvents.events == nil {
+		return &dummyEventsPanel{}
+	}
+	return &r.cEvents
+}
+
+func (r *runtimeSetupImpl) ListenOn(topic string, handler events.EventHandler) {
+	if r.requestedTopics == nil {
+		r.requestedTopics = make(map[string]events.EventHandler)
+	}
+	if _, exists := r.requestedTopics[topic]; exists {
+		panic(fmt.Errorf("topic already requested: %s", topic))
+	}
+	r.requestedTopics[topic] = handler
+}
 
 func (r *runtimeImpl) GetLogger(component string) *slog.Logger {
 	return r.logger.With("component", component)
@@ -155,6 +207,14 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 
 	appRtCtx, appRtCancel := context.WithCancel(context.Background())
 
+	eventConfig := events.EventManagerConfig{
+		MaxTopics:           1024,
+		MaxHandlersPerTopic: 64,
+		WorkerPoolSize:      256,
+		Logger:              logger.WithGroup("events"),
+	}
+	eventsManager := events.NewEventManager(appRtCtx, &eventConfig)
+
 	runtimeActual := &runtimeImpl{
 		ctx:       appRtCtx,
 		cancel:    appRtCancel,
@@ -179,6 +239,23 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 			logger:        logger.WithGroup("insi"),
 			skipVerify:    false,
 		},
+		cEvents: runtimeEventsConcern{
+			events:       eventsManager,
+			activeTopics: make(map[string]string),
+		},
+	}
+
+	if rts.requestedTopics != nil {
+		for topic, handler := range rts.requestedTopics {
+			if err := eventsManager.RegisterTopic(topic); err != nil && err != events.ErrTopicAlreadyRegistered {
+				panic(err)
+			}
+			handlerID, err := eventsManager.AddHandler(topic, handler)
+			if err != nil {
+				panic(err)
+			}
+			runtimeActual.cEvents.activeTopics[handlerID] = topic
+		}
 	}
 
 	if rts.insiBinder != nil {
@@ -212,4 +289,8 @@ func (r *runtimeImpl) Shutdown() {
 		r.cSideCar.host.StopApp("*")
 	}
 	r.cancel()
+}
+
+func (r *runtimeEventsConcern) GetTopicPublisher(topic string) (events.TopicPublisher, error) {
+	return r.events.GetTopicPublisher(topic)
 }

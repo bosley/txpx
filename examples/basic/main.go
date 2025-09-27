@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bosley/txpx/pkg/app"
+	"github.com/bosley/txpx/pkg/events"
 	"github.com/bosley/txpx/pkg/security"
 	"github.com/fatih/color"
 )
@@ -25,11 +26,26 @@ type DemoHttpsApp struct {
 
 	logger *slog.Logger
 
-	rt app.AppRuntime
+	rt        app.AppRuntime
+	startTime time.Time
 }
 
 var _ app.ApplicationCandidate = &DemoHttpsApp{}
 var _ app.AppHTTPBinder = &DemoHttpsApp{}
+var _ app.AppMetaStat = &DemoHttpsApp{}
+var _ events.EventHandler = &DemoHttpsApp{}
+
+func (d *DemoHttpsApp) GetAppMeta() app.AppMetaStat {
+	return d
+}
+
+func (d *DemoHttpsApp) GetIdentifier() string {
+	return d.binding
+}
+
+func (d *DemoHttpsApp) GetUptime() time.Duration {
+	return time.Since(d.startTime)
+}
 
 // HTTP
 func (d *DemoHttpsApp) GetBinding() string {
@@ -52,6 +68,10 @@ func (d *DemoHttpsApp) GetApiMountPoint() string {
 	return "/api"
 }
 
+func (d *DemoHttpsApp) OnEvent(event events.Event) {
+	color.HiMagenta("received event: %s", event.Body)
+}
+
 func (d *DemoHttpsApp) Initialize(logger *slog.Logger, rt app.AppRuntimeSetup) error {
 
 	logger.Info("This is just the default logger. It wont be used in the app.")
@@ -64,6 +84,9 @@ func (d *DemoHttpsApp) Initialize(logger *slog.Logger, rt app.AppRuntimeSetup) e
 
 	// indicate we want to use the http server binder
 	rt.RequireHttpServer(d)
+
+	// Listen on a system topic so we can receive events
+	rt.ListenOn("demo-https-app", d)
 	return nil
 }
 
@@ -100,6 +123,15 @@ func (d *DemoHttpsApp) Main(ctx context.Context, rap app.AppRuntime) {
 		d.logger.Info("value", "value", string(value))
 	}()
 
+	publishToSelf := func() {
+		publisher, err := d.rt.GetEventsPanel().GetTopicPublisher("demo-https-app")
+		if err != nil {
+			d.logger.Error("error getting event publisher", "error", err)
+		}
+		publisher.Publish(events.Event{Body: "test"})
+		d.logger.Info("published event")
+	}
+
 	for {
 		interrupt := make(chan os.Signal, 1)
 		signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
@@ -116,6 +148,7 @@ func (d *DemoHttpsApp) Main(ctx context.Context, rap app.AppRuntime) {
 			return
 		case <-ticker.C:
 			d.logger.Debug("tick")
+			publishToSelf()
 		}
 	}
 }
@@ -139,6 +172,7 @@ func NewDemoHttpsApp(binding string) *DemoHttpsApp {
 		binding:    binding,
 		keysDir:    keysDir,
 		installDir: installDir,
+		startTime:  time.Now(),
 	}
 }
 
