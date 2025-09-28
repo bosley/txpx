@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -35,6 +37,12 @@ type AppHTTPBinder interface {
 	BindPublicRoutes(mux *http.ServeMux)
 }
 
+type ApiClient interface {
+	Ping() error
+	Status() error
+	Shutdown() error
+}
+
 /*
 The specific concerns for HTTP users
 When HTTP/s is indicated the panel can be offered to inform the application
@@ -44,16 +52,23 @@ type AppHttpPanel interface {
 	GetAuthorizationToken() string
 	BumpAuthToken() string
 	GetApiMountPoint() string
+
+	GetApiClient(skipTLSVerify bool) ApiClient // http backend client
 }
 
 type runtimeHttpConcern struct {
 	currentAuthToken string
+
+	rt *runtimeImpl
+
 	httpServerBinder AppHTTPBinder
 	httpServer       *http.Server
 	serverMu         sync.RWMutex
 
 	certPath string
 	keyPath  string
+
+	api api.API
 }
 
 var _ AppHttpPanel = &runtimeHttpConcern{}
@@ -352,4 +367,116 @@ func (rt *runtimeImpl) httpApiHandleRuntimeShutdown(w http.ResponseWriter, r *ht
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status": "shutdown initiated"}`))
+}
+
+/*
+
+HTTP Client to talk to the api iteself
+
+*/
+
+func (r *runtimeHttpConcern) GetApiClient(skipTLSVerify bool) ApiClient {
+	return newHttpApiClient(r.rt, skipTLSVerify)
+}
+
+type httpApiClientImpl struct {
+	rt         *runtimeImpl
+	httpClient *http.Client
+}
+
+func newHttpApiClient(rt *runtimeImpl, skipTLSVerify bool) *httpApiClientImpl {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: skipTLSVerify,
+		},
+	}
+
+	return &httpApiClientImpl{
+		rt: rt,
+		httpClient: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+		},
+	}
+}
+
+func (h *httpApiClientImpl) doFetch(url string, method string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(HttpAuthorizationHeader, h.rt.cHttp.currentAuthToken)
+	return h.httpClient.Do(req)
+}
+
+func (h *httpApiClientImpl) Ping() error {
+	binding := h.rt.cHttp.httpServerBinder.GetBinding()
+	useTLS, _ := h.rt.cHttp.useTLS()
+
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
+
+	url := fmt.Sprintf("%s://%s%s/ping", scheme, binding, HttpTxPxApiMountPoint)
+
+	resp, err := h.httpClient.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ping failed with status: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func (h *httpApiClientImpl) Status() error {
+	binding := h.rt.cHttp.httpServerBinder.GetBinding()
+	useTLS, _ := h.rt.cHttp.useTLS()
+
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
+
+	url := fmt.Sprintf("%s://%s%s/status", scheme, binding, HttpTxPxApiMountPoint)
+
+	resp, err := h.doFetch(url, "GET", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status failed with status: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func (h *httpApiClientImpl) Shutdown() error {
+	binding := h.rt.cHttp.httpServerBinder.GetBinding()
+	useTLS, _ := h.rt.cHttp.useTLS()
+
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
+
+	url := fmt.Sprintf("%s://%s%s/shutdown", scheme, binding, HttpTxPxApiMountPoint)
+
+	resp, err := h.doFetch(url, "POST", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("shutdown failed with status: %d", resp.StatusCode)
+	}
+
+	return nil
 }

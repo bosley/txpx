@@ -31,16 +31,6 @@ var (
 	VERSION = fmt.Sprintf("%d.%d.%d", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH)
 )
 
-type Status string
-
-const (
-	StatusRunning  Status = "running"
-	StatusStopped  Status = "stopped"
-	StatusStarting Status = "starting"
-	StatusStopping Status = "stopping"
-	StatusError    Status = "error"
-)
-
 func init() {
 	/*
 		We will be using a lot of uuids, so we need to enable the rand pool
@@ -62,6 +52,7 @@ distributed coordination and web services.
 func main() {
 	// Insi Specific Flags
 	var (
+		usingInsi  = flag.Bool("insi", false, "Run the insi cluster itself.")
 		nodeID     = flag.String("as", "", "Node ID to run as (e.g., node0). Mutually exclusive with --host.")
 		hostAll    = flag.Bool("host", false, "Run instances for all nodes in the config. Mutually exclusive with --as.")
 		configPath = flag.String("config", "", "Path to the cluster configuration file.")
@@ -80,42 +71,58 @@ func main() {
 		os.Exit(0)
 	}
 
-	// insi
-
-	if *hostAll && *nodeID != "" {
-		color.HiRed("Error: --host and --as flags are mutually exclusive")
-		os.Exit(1)
-	}
-
 	instanceId := uuid.New().String()
 
-	txpxApp := NewAppTxPx(fmt.Sprintf("txpx-%s", instanceId))
+	txpxApp := NewAppTxPx(fmt.Sprintf("txpx-%s", instanceId), *usingInsi)
 
-	var insidArgs []string
+	// insi
+	if *usingInsi {
 
-	if *configPath != "" {
-		insidArgs = append(insidArgs, "--config", *configPath)
-	} else {
-		insidArgs = append(insidArgs, "--config", filepath.Join(
-			txpxApp.GetInstallDir(),
-			ConfigFileClusterDefault,
-		))
+		if *hostAll && *nodeID != "" {
+			color.HiRed("Error: --host and --as flags are mutually exclusive")
+			os.Exit(1)
+		}
+
+		var insidArgs []string
+
+		if *configPath != "" {
+			insidArgs = append(insidArgs, "--config", *configPath)
+		} else {
+			insidArgs = append(insidArgs, "--config", filepath.Join(
+				txpxApp.GetInstallDir(),
+				ConfigFileClusterDefault,
+			))
+		}
+
+		if *hostAll {
+			insidArgs = append(insidArgs, "--host")
+		} else if *nodeID != "" {
+			insidArgs = append(insidArgs, "--as", *nodeID)
+		} else {
+			color.HiRed("Error: --host or --as flag is required")
+			os.Exit(1)
+		}
+
+		if txpxApp.config.Prod {
+			insidArgs = append(insidArgs, "--prod")
+		}
+
+		txpxApp.SetupInsidPreLaunch(insidArgs)
+
 	}
 
-	if *hostAll {
-		insidArgs = append(insidArgs, "--host")
-	} else if *nodeID != "" {
-		insidArgs = append(insidArgs, "--as", *nodeID)
-	} else {
-		color.HiRed("Error: --host or --as flag is required")
-		os.Exit(1)
-	}
+	/*
+		Before we launch the app, we check to see if there are any cli arguments specific to
+		the app that we need to handle
+	*/
+	remainingArgs := flag.Args()
 
-	if txpxApp.config.Prod {
-		insidArgs = append(insidArgs, "--prod")
+	if len(remainingArgs) > 0 {
+		if err := executeCliArguments(remainingArgs, txpxApp); err != nil {
+			color.HiRed("Error: %v", err)
+			os.Exit(1)
+		}
 	}
-
-	txpxApp.SetupInsidPreLaunch(insidArgs)
 
 	opt := app.New(txpxApp)
 
@@ -236,7 +243,7 @@ type AppTxPx struct {
 }
 
 func NewAppTxPx(
-	identifier string) *AppTxPx {
+	identifier string, usingInsi bool) *AppTxPx {
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -297,17 +304,21 @@ func NewAppTxPx(
 		panic(err)
 	}
 
-	/*
-		This is the insi cluster configuration that the application is hosting.
-		From this we derive the root insi api key for full control of the cluster or
-		node (depending on --host or --as)
+	var insiCfg *config.Cluster
+	if usingInsi {
+		/*
+			This is the insi cluster configuration that the application is hosting.
+			From this we derive the root insi api key for full control of the cluster or
+			node (depending on --host or --as)
 
-		With this insi as a node, we can briddge multiple instances of the application
-		across the insi event system
-	*/
-	insiCfg, err := config.LoadConfig(filepath.Join(installDir, ConfigFileClusterDefault))
-	if err != nil {
-		panic(err)
+			With this insi as a node, we can briddge multiple instances of the application
+			across the insi event system
+		*/
+		cfg, err := config.LoadConfig(filepath.Join(installDir, ConfigFileClusterDefault))
+		if err != nil {
+			panic(err)
+		}
+		insiCfg = cfg
 	}
 
 	return &AppTxPx{
@@ -358,14 +369,16 @@ func (a *AppTxPx) Initialize(logger *slog.Logger, rt app.AppRuntimeSetup) error 
 	// kv datastore
 	rt.SetInstallPath(a.installDir)
 
-	a.insidController = insid.NewController(
-		a.logger.With("component", "insid"),
-		a.insiCfg,
-		a,
-	)
-
-	// insi
-	rt.RequireInsi(a.insidController)
+	// with insi
+	if a.insiCfg != nil {
+		a.logger.Info("setting up insi controller")
+		a.insidController = insid.NewController(
+			a.logger.With("component", "insid"),
+			a.insiCfg,
+			a,
+		)
+		rt.RequireInsi(a.insidController)
+	}
 
 	return nil
 }
@@ -384,8 +397,9 @@ func (a *AppTxPx) Main(ctx context.Context, rap app.AppRuntime) {
 	*/
 	a.httpServer.setApp(a)
 
-	// insi
-	go a.insidController.Start(a.appCtx, a.insidArgs, 10*time.Second, a.rt)
+	if a.insidController != nil {
+		go a.insidController.Start(a.appCtx, a.insidArgs, 10*time.Second, a.rt)
+	}
 }
 
 func (a *AppTxPx) OnApiEvent(event events.Event) {

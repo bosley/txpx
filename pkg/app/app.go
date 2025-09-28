@@ -266,6 +266,7 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 		cHttp: runtimeHttpConcern{
 			httpServerBinder: rts.httpServerBinder,
 			currentAuthToken: "",
+			api:              appApi,
 		},
 		cSideCar: runtimeSideCarConcern{
 			hostedApps: make(map[string]*procman.HostedApp),
@@ -291,6 +292,8 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 			),
 		},
 	}
+
+	runtimeActual.cHttp.rt = runtimeActual
 
 	// Always listen on the tx topic to forward tx events to the candidate
 	rts.ListenOn(api.EventTopic, runtimeActual)
