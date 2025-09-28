@@ -1,0 +1,10 @@
+{{define "title"}}Dashboard - TXPX{{end}}
+
+{{define "content"}}
+<h1>Dashboard</h1>
+<p>Welcome to your dashboard</p>
+<form method="post">
+    <input type="hidden" name="csrf_token" value="{{ .CSRFToken }}">
+    <button type="submit">Action</button>
+</form>
+{{end}}

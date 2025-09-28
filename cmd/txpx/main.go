@@ -12,9 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/InsulaLabs/insi/config"
+	insiConfig "github.com/InsulaLabs/insi/config"
 	"github.com/bosley/txpx/cmd/txpx/assets"
+	"github.com/bosley/txpx/cmd/txpx/config"
 	"github.com/bosley/txpx/internal/insid"
+	"github.com/bosley/txpx/internal/views"
 	"github.com/bosley/txpx/pkg/app"
 	"github.com/bosley/txpx/pkg/events"
 	"github.com/fatih/color"
@@ -96,7 +98,7 @@ func main() {
 		} else {
 			insidArgs = append(insidArgs, "--config", filepath.Join(
 				txpxApp.GetInstallDir(),
-				ConfigFileClusterDefault,
+				config.ConfigFileClusterDefault,
 			))
 		}
 
@@ -208,10 +210,10 @@ func (a *AppMetaTxPx) GetUptime() time.Duration {
 
 func (a *AppMetaTxPx) APIHeaderExpectation() [4]byte {
 	return [4]byte{
-		HeaderValImportanceHighest,
-		HeaderValThreadOriginTxPxApi,
-		HeaderValSpecificEventTxPxApiToMainApp,
-		HeaderValFilterAcceptAll,
+		config.HeaderValImportanceHighest,
+		config.HeaderValThreadOriginTxPxApi,
+		config.HeaderValSpecificEventTxPxApiToMainApp,
+		config.HeaderValFilterAcceptAll,
 	}
 }
 
@@ -229,7 +231,7 @@ type AppTxPx struct {
 	appCtx    context.Context
 	appCancel context.CancelFunc
 
-	config     *Config
+	config     *config.Config
 	installDir string
 
 	rt app.AppRuntime
@@ -240,9 +242,11 @@ type AppTxPx struct {
 
 	insidArgs       []string
 	insidController insid.Controller
-	insiCfg         *config.Cluster
+	insiCfg         *insiConfig.Cluster
 
 	appArgs []string
+
+	viewManager *views.ViewManager
 }
 
 func NewAppTxPx(
@@ -284,13 +288,13 @@ func NewAppTxPx(
 	}
 
 	go ensureFileInstalled(
-		filepath.Join(installDir, ConfigFileClusterDefault),
-		ConfigFileClusterDefault,
+		filepath.Join(installDir, config.ConfigFileClusterDefault),
+		config.ConfigFileClusterDefault,
 	)
 
 	go ensureFileInstalled(
-		filepath.Join(installDir, ConfigFileSiteDefault),
-		ConfigFileSiteDefault,
+		filepath.Join(installDir, config.ConfigFileSiteDefault),
+		config.ConfigFileSiteDefault,
 	)
 
 	wg.Wait()
@@ -302,12 +306,12 @@ func NewAppTxPx(
 		the txpx application sets to interact with eachothers clusters,
 		even if they aren't part of the same cluster network.
 	*/
-	appCfg, err := LoadConfig(filepath.Join(installDir, ConfigFileSiteDefault))
+	appCfg, err := config.LoadConfig(filepath.Join(installDir, config.ConfigFileSiteDefault))
 	if err != nil {
 		panic(err)
 	}
 
-	var insiCfg *config.Cluster
+	var insiCfg *insiConfig.Cluster
 	if usingInsi {
 		/*
 			This is the insi cluster configuration that the application is hosting.
@@ -317,7 +321,7 @@ func NewAppTxPx(
 			With this insi as a node, we can briddge multiple instances of the application
 			across the insi event system
 		*/
-		cfg, err := config.LoadConfig(filepath.Join(installDir, ConfigFileClusterDefault))
+		cfg, err := insiConfig.LoadConfig(filepath.Join(installDir, config.ConfigFileClusterDefault))
 		if err != nil {
 			panic(err)
 		}
@@ -360,19 +364,22 @@ func (a *AppTxPx) Initialize(logger *slog.Logger, rt app.AppRuntimeSetup) error 
 
 	a.logger = logger
 
+	// views
+	a.viewManager = views.NewViewManager(logger)
+
 	// http
-	a.httpServer = NewAppTxPxHttpServer(logger, a.config)
+	a.httpServer = NewAppTxPxHttpServer(logger, a.config, a.viewManager)
 	a.httpServer.Initialize(rt)
 
 	// events
 	a.systemEventHandler = &AppTxPxSystemEventHandler{
-		logger: logger.With("component", EventTopicTxPxSystem),
+		logger: logger.With("component", config.EventTopicTxPxSystem),
 		app:    a,
 	}
 
-	rt.ListenOn(EventTopicTxPxSystem, a.systemEventHandler)
+	rt.ListenOn(config.EventTopicTxPxSystem, a.systemEventHandler)
 
-	rt.ListenOn(EventTopicTxPxMainApp, a)
+	rt.ListenOn(config.EventTopicTxPxMainApp, a)
 
 	// kv datastore
 	rt.SetInstallPath(a.installDir)
@@ -425,15 +432,15 @@ func (a *AppTxPx) OnEvent(event events.Event) {
 }
 
 func (a *AppTxPx) InsidOnline(insiPingData map[string]string) {
-	systemPublisher, err := a.rt.GetEventsPanel().GetTopicPublisher(EventTopicTxPxSystem)
+	systemPublisher, err := a.rt.GetEventsPanel().GetTopicPublisher(config.EventTopicTxPxSystem)
 	if err != nil {
 		a.logger.Error("Failed to get system publisher", "error", err)
 		return
 	}
 	systemPublisher.Publish(events.Event{
 		Header: ConstructEventHeader(
-			HeaderValImportanceHighest,
-			HeaderValThreadOriginTxPxInsi,
+			config.HeaderValImportanceHighest,
+			config.HeaderValThreadOriginTxPxInsi,
 			int(SystemEventIdentifierInsiOnline),
 		),
 		Body: insiPingData,
@@ -441,15 +448,15 @@ func (a *AppTxPx) InsidOnline(insiPingData map[string]string) {
 }
 
 func (a *AppTxPx) InsidOffline() {
-	systemPublisher, err := a.rt.GetEventsPanel().GetTopicPublisher(EventTopicTxPxSystem)
+	systemPublisher, err := a.rt.GetEventsPanel().GetTopicPublisher(config.EventTopicTxPxSystem)
 	if err != nil {
 		a.logger.Error("Failed to get system publisher", "error", err)
 		return
 	}
 	systemPublisher.Publish(events.Event{
 		Header: ConstructEventHeader(
-			HeaderValImportanceHighest,
-			HeaderValThreadOriginTxPxInsi,
+			config.HeaderValImportanceHighest,
+			config.HeaderValThreadOriginTxPxInsi,
 			int(SystemEventIdentifierInsiOffline),
 		),
 	})

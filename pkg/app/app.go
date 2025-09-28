@@ -132,6 +132,7 @@ type runtimeImpl struct {
 	cEvents       runtimeEventsConcern
 
 	isPerformingApiTriggeredShutdown atomic.Bool
+	isShuttingDown                   atomic.Bool
 }
 
 var _ AppRuntime = &runtimeImpl{}
@@ -346,6 +347,14 @@ func (r *runtimeImpl) Launch() {
 }
 
 func (r *runtimeImpl) Shutdown() {
+
+	if r.isShuttingDown.Load() {
+		return
+	}
+
+	r.isShuttingDown.Store(true)
+	defer r.isShuttingDown.Store(false)
+
 	r.logger.Info("Shutting down application runtime")
 
 	if r.cSideCar.host != nil {

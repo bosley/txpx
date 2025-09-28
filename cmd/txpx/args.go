@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bosley/txpx/cmd/txpx/config"
 	"github.com/bosley/txpx/pkg/app"
 )
 
@@ -77,7 +78,7 @@ func executeCliArguments(args []string, app *AppTxPx, application app.AppRuntime
 	return nil
 }
 
-func shouldSkipTLSVerify(config *Config) bool {
+func shouldSkipTLSVerify(config *config.Config) bool {
 	return !config.Prod
 }
 

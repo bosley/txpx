@@ -1,13 +1,17 @@
 package main
 
-import "time"
+import (
+	"time"
+
+	"github.com/bosley/txpx/cmd/txpx/config"
+)
 
 func ConstructEventHeader(importance int, threadOrigin int, specificEventIdentifier int) [4]byte {
 	return [4]byte{
 		byte(importance),
 		byte(threadOrigin),
 		byte(specificEventIdentifier),
-		HeaderValFilterAcceptAll,
+		config.HeaderValFilterAcceptAll,
 	}
 }
 
@@ -18,8 +22,8 @@ func ConstructEventHeader(importance int, threadOrigin int, specificEventIdentif
 type SystemEventIdentifier int
 
 const (
-	SystemEventIdentifierInsiOnline  SystemEventIdentifier = HeaderValSpecificEventIdentifier_SystemBeginInclusive
-	SystemEventIdentifierInsiOffline SystemEventIdentifier = HeaderValSpecificEventIdentifier_SystemBeginInclusive + 1
+	SystemEventIdentifierInsiOnline  SystemEventIdentifier = config.HeaderValSpecificEventIdentifier_SystemBeginInclusive
+	SystemEventIdentifierInsiOffline SystemEventIdentifier = config.HeaderValSpecificEventIdentifier_SystemBeginInclusive + 1
 )
 
 type EventInsiOnline struct {
