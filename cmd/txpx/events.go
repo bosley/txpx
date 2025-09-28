@@ -3,7 +3,12 @@ package main
 import "time"
 
 func ConstructEventHeader(importance int, threadOrigin int, specificEventIdentifier int) [4]byte {
-	return [4]byte{byte(importance), byte(threadOrigin), byte(specificEventIdentifier), 0}
+	return [4]byte{
+		byte(importance),
+		byte(threadOrigin),
+		byte(specificEventIdentifier),
+		HeaderValFilterAcceptAll,
+	}
 }
 
 /*
@@ -13,8 +18,8 @@ func ConstructEventHeader(importance int, threadOrigin int, specificEventIdentif
 type SystemEventIdentifier int
 
 const (
-	SystemEventIdentifierInsiOnline  SystemEventIdentifier = SpecificEventIdentifier_SystemBeginInclusive
-	SystemEventIdentifierInsiOffline SystemEventIdentifier = SystemEventIdentifierInsiOnline + 1
+	SystemEventIdentifierInsiOnline  SystemEventIdentifier = HeaderValSpecificEventIdentifier_SystemBeginInclusive
+	SystemEventIdentifierInsiOffline SystemEventIdentifier = HeaderValSpecificEventIdentifier_SystemBeginInclusive + 1
 )
 
 type EventInsiOnline struct {

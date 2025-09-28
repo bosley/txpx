@@ -21,6 +21,35 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	VERSION_MAJOR = 0
+	VERSION_MINOR = 1
+	VERSION_PATCH = 0
+)
+
+var (
+	VERSION = fmt.Sprintf("%d.%d.%d", VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH)
+)
+
+type Status string
+
+const (
+	StatusRunning  Status = "running"
+	StatusStopped  Status = "stopped"
+	StatusStarting Status = "starting"
+	StatusStopping Status = "stopping"
+	StatusError    Status = "error"
+)
+
+func init() {
+	/*
+		We will be using a lot of uuids, so we need to enable the rand pool
+		so we don't have to wait for the first call to uuid.New() to initialize
+		the pool.
+	*/
+	uuid.EnableRandPool()
+}
+
 /*
 This application comes up and helps us boostrap insi clusters/ utilize them for cross-
 application coordination.
@@ -31,12 +60,27 @@ The goal is to make txpx an app to quickly launch and utilize the insi network f
 distributed coordination and web services.
 */
 func main() {
+	// Insi Specific Flags
 	var (
 		nodeID     = flag.String("as", "", "Node ID to run as (e.g., node0). Mutually exclusive with --host.")
 		hostAll    = flag.Bool("host", false, "Run instances for all nodes in the config. Mutually exclusive with --as.")
 		configPath = flag.String("config", "", "Path to the cluster configuration file.")
 	)
+
+	// TxPx Specific Flags
+	var (
+		version = flag.Bool("version", false, "Print the version and exit.")
+	)
+
 	flag.Parse()
+
+	// txpx
+	if *version {
+		fmt.Println(VERSION)
+		os.Exit(0)
+	}
+
+	// insi
 
 	if *hostAll && *nodeID != "" {
 		color.HiRed("Error: --host and --as flags are mutually exclusive")
@@ -152,6 +196,15 @@ func (a *AppMetaTxPx) GetIdentifier() string {
 
 func (a *AppMetaTxPx) GetUptime() time.Duration {
 	return time.Since(a.startTime)
+}
+
+func (a *AppMetaTxPx) APIHeaderExpectation() [4]byte {
+	return [4]byte{
+		HeaderValImportanceHighest,
+		HeaderValThreadOriginTxPxApi,
+		HeaderValSpecificEventTxPxApiToMainApp,
+		HeaderValFilterAcceptAll,
+	}
 }
 
 /*
@@ -317,10 +370,6 @@ func (a *AppTxPx) Initialize(logger *slog.Logger, rt app.AppRuntimeSetup) error 
 	return nil
 }
 
-func (a *AppTxPx) OnEvent(event events.Event) {
-	a.logger.Info("received event", "event", event)
-}
-
 func (a *AppTxPx) Main(ctx context.Context, rap app.AppRuntime) {
 
 	a.appCtx, a.appCancel = context.WithCancel(ctx)
@@ -339,6 +388,20 @@ func (a *AppTxPx) Main(ctx context.Context, rap app.AppRuntime) {
 	go a.insidController.Start(a.appCtx, a.insidArgs, 10*time.Second, a.rt)
 }
 
+func (a *AppTxPx) OnApiEvent(event events.Event) {
+	/*
+		A TX event from teh app - an api message of some sort
+	*/
+	a.logger.Info("received  event", "event", event)
+}
+
+func (a *AppTxPx) OnEvent(event events.Event) {
+	/*
+		A normal event from somewhere in this app
+	*/
+	a.logger.Info("received event", "event", event)
+}
+
 func (a *AppTxPx) InsidOnline(insiPingData map[string]string) {
 	systemPublisher, err := a.rt.GetEventsPanel().GetTopicPublisher(EventTopicTxPxSystem)
 	if err != nil {
@@ -347,8 +410,8 @@ func (a *AppTxPx) InsidOnline(insiPingData map[string]string) {
 	}
 	systemPublisher.Publish(events.Event{
 		Header: ConstructEventHeader(
-			ImportanceHighest,
-			ThreadOriginTxPxInsi,
+			HeaderValImportanceHighest,
+			HeaderValThreadOriginTxPxInsi,
 			int(SystemEventIdentifierInsiOnline),
 		),
 		Body: insiPingData,
@@ -363,8 +426,8 @@ func (a *AppTxPx) InsidOffline() {
 	}
 	systemPublisher.Publish(events.Event{
 		Header: ConstructEventHeader(
-			ImportanceHighest,
-			ThreadOriginTxPxInsi,
+			HeaderValImportanceHighest,
+			HeaderValThreadOriginTxPxInsi,
 			int(SystemEventIdentifierInsiOffline),
 		),
 	})
