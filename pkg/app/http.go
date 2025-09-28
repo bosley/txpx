@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bosley/txpx/pkg/app/internal/api/v1"
 	"github.com/bosley/txpx/pkg/beau"
+	"github.com/bosley/txpx/pkg/security"
 	"github.com/google/uuid"
 )
 
@@ -39,8 +42,8 @@ type AppHTTPBinder interface {
 
 type ApiClient interface {
 	Ping() error
-	Status() error
-	Shutdown() error
+	Status() string
+	Shutdown() (string, error)
 }
 
 /*
@@ -68,10 +71,17 @@ type runtimeHttpConcern struct {
 	certPath string
 	keyPath  string
 
-	api api.API
+	installDir string
+
+	secret string
+	api    api.API
 }
 
 var _ AppHttpPanel = &runtimeHttpConcern{}
+
+func (r *runtimeHttpConcern) cleanAuthToken() {
+	os.Remove(filepath.Join(r.installDir, "auth.token"))
+}
 
 func (r *runtimeHttpConcern) GetAuthorizationToken() string {
 	return r.currentAuthToken
@@ -80,6 +90,19 @@ func (r *runtimeHttpConcern) GetAuthorizationToken() string {
 func (r *runtimeHttpConcern) BumpAuthToken() string {
 	newToken := uuid.New().String()
 	r.currentAuthToken = newToken
+
+	go func() {
+		encryptedToken, err := security.Encrypt([]byte(newToken), r.secret)
+		if err != nil {
+			r.rt.logger.Error("Error encrypting auth token", "error", err)
+			return
+		}
+
+		if err := os.WriteFile(filepath.Join(r.installDir, "auth.token"), []byte(encryptedToken), 0600); err != nil {
+			r.rt.logger.Error("Error writing auth token file", "error", err)
+		}
+	}()
+
 	return newToken
 }
 
@@ -376,15 +399,16 @@ HTTP Client to talk to the api iteself
 */
 
 func (r *runtimeHttpConcern) GetApiClient(skipTLSVerify bool) ApiClient {
-	return newHttpApiClient(r.rt, skipTLSVerify)
+	return newHttpApiClient(r.rt, r, skipTLSVerify)
 }
 
 type httpApiClientImpl struct {
 	rt         *runtimeImpl
+	r          *runtimeHttpConcern
 	httpClient *http.Client
 }
 
-func newHttpApiClient(rt *runtimeImpl, skipTLSVerify bool) *httpApiClientImpl {
+func newHttpApiClient(rt *runtimeImpl, r *runtimeHttpConcern, skipTLSVerify bool) *httpApiClientImpl {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: skipTLSVerify,
@@ -393,6 +417,7 @@ func newHttpApiClient(rt *runtimeImpl, skipTLSVerify bool) *httpApiClientImpl {
 
 	return &httpApiClientImpl{
 		rt: rt,
+		r:  r,
 		httpClient: &http.Client{
 			Timeout:   30 * time.Second,
 			Transport: transport,
@@ -401,26 +426,50 @@ func newHttpApiClient(rt *runtimeImpl, skipTLSVerify bool) *httpApiClientImpl {
 }
 
 func (h *httpApiClientImpl) doFetch(url string, method string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequest(method, url, body)
+	authToken, err := os.ReadFile(filepath.Join(h.r.installDir, "auth.token"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("auth.token file not found; is the server running?")
+		}
+		return nil, err
+	}
+
+	decryptedToken, err := security.Decrypt(string(authToken), h.r.secret)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set(HttpAuthorizationHeader, h.rt.cHttp.currentAuthToken)
-	return h.httpClient.Do(req)
+
+	attemptRequest := func(targetUrl string) (*http.Response, error) {
+		req, err := http.NewRequest(method, targetUrl, body)
+		if err != nil {
+			h.rt.logger.Error("Failed to create request", "error", err)
+			return nil, err
+		}
+
+		req.Header.Set(HttpAuthorizationHeader, string(decryptedToken))
+		return h.httpClient.Do(req)
+	}
+
+	return attemptRequest(url)
+}
+
+func (h *httpApiClientImpl) makeUrl(path string) string {
+	binding := h.rt.cHttp.httpServerBinder.GetBinding()
+	keyPathSet := h.rt.cHttp.httpServerBinder.GetKeyPath() != ""
+	certPathSet := h.rt.cHttp.httpServerBinder.GetCertPath() != ""
+
+	protocol := "http"
+	if keyPathSet && certPathSet {
+		protocol = "https"
+	}
+	return fmt.Sprintf("%s://%s%s%s", protocol, binding, HttpTxPxApiMountPoint, path)
 }
 
 func (h *httpApiClientImpl) Ping() error {
-	binding := h.rt.cHttp.httpServerBinder.GetBinding()
-	useTLS, _ := h.rt.cHttp.useTLS()
 
-	scheme := "http"
-	if useTLS {
-		scheme = "https"
-	}
+	url := h.makeUrl("/ping")
 
-	url := fmt.Sprintf("%s://%s%s/ping", scheme, binding, HttpTxPxApiMountPoint)
-
-	resp, err := h.httpClient.Get(url)
+	resp, err := h.doFetch(url, "GET", nil)
 	if err != nil {
 		return err
 	}
@@ -433,50 +482,46 @@ func (h *httpApiClientImpl) Ping() error {
 	return nil
 }
 
-func (h *httpApiClientImpl) Status() error {
-	binding := h.rt.cHttp.httpServerBinder.GetBinding()
-	useTLS, _ := h.rt.cHttp.useTLS()
-
-	scheme := "http"
-	if useTLS {
-		scheme = "https"
-	}
-
-	url := fmt.Sprintf("%s://%s%s/status", scheme, binding, HttpTxPxApiMountPoint)
+func (h *httpApiClientImpl) Status() string {
+	url := h.makeUrl("/status")
 
 	resp, err := h.doFetch(url, "GET", nil)
 	if err != nil {
-		return err
+		return ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status failed with status: %d", resp.StatusCode)
+		return ""
 	}
 
-	return nil
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.rt.logger.Error("Failed to read status response body", "error", err)
+		return ""
+	}
+
+	return string(body)
 }
 
-func (h *httpApiClientImpl) Shutdown() error {
-	binding := h.rt.cHttp.httpServerBinder.GetBinding()
-	useTLS, _ := h.rt.cHttp.useTLS()
-
-	scheme := "http"
-	if useTLS {
-		scheme = "https"
-	}
-
-	url := fmt.Sprintf("%s://%s%s/shutdown", scheme, binding, HttpTxPxApiMountPoint)
+func (h *httpApiClientImpl) Shutdown() (string, error) {
+	url := h.makeUrl("/shutdown")
 
 	resp, err := h.doFetch(url, "POST", nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("shutdown failed with status: %d", resp.StatusCode)
+		return "", fmt.Errorf("shutdown failed with status: %d", resp.StatusCode)
 	}
 
-	return nil
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.rt.logger.Error("Failed to read shutdown response body", "error", err)
+		return "", err
+	}
+
+	return string(body), nil
 }

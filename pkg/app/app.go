@@ -31,6 +31,8 @@ type ApplicationCandidate interface {
 
 	GetAppMeta() AppMetaStat
 
+	GetAppSecret() string
+
 	/*
 		A TX Event is a transaction event from the app backend.
 		This is required, even if no http insi fs et al are used
@@ -112,8 +114,9 @@ type runtimeEventsConcern struct {
 var _ AppEventsPanel = &runtimeEventsConcern{}
 
 type runtimeImpl struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx         context.Context
+	installPath string
+	cancel      context.CancelFunc
 
 	logger *slog.Logger
 
@@ -254,19 +257,20 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 	)
 
 	runtimeActual := &runtimeImpl{
-		ctx:       appRtCtx,
-		cancel:    appRtCancel,
-		logger:    logger.With("runtime", "app"),
-		candidate: candidate,
-		cFS: runtimeFSConcern{
-			fs:          xfs.NewDataStore(logger, appRtCtx, rts.installPath),
-			installPath: rts.installPath,
-		},
-		workPool: pool.NewBuilder().WithLogger(logger).Build(appRtCtx),
+		ctx:         appRtCtx,
+		cancel:      appRtCancel,
+		logger:      logger.With("runtime", "app"),
+		installPath: rts.installPath,
+		candidate:   candidate,
+		workPool:    pool.NewBuilder().WithLogger(logger).Build(appRtCtx),
+		// Note: CFS postponed until Launch to ensure we can have multiple instances of pre-launch + launched
+		// for cli driving
 		cHttp: runtimeHttpConcern{
 			httpServerBinder: rts.httpServerBinder,
 			currentAuthToken: "",
 			api:              appApi,
+			installDir:       rts.installPath,
+			secret:           candidate.GetAppSecret(),
 		},
 		cSideCar: runtimeSideCarConcern{
 			hostedApps: make(map[string]*procman.HostedApp),
@@ -323,6 +327,12 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 }
 
 func (r *runtimeImpl) Launch() {
+
+	r.cFS = runtimeFSConcern{
+		fs:          xfs.NewDataStore(r.logger, r.ctx, r.installPath),
+		installPath: r.installPath,
+	}
+
 	if r.cHttp.httpServerBinder != nil {
 		r.internalSetupHttpServer()
 	}
@@ -341,6 +351,7 @@ func (r *runtimeImpl) Shutdown() {
 	if r.cSideCar.host != nil {
 		r.cSideCar.host.StopApp("*")
 	}
+	r.cHttp.cleanAuthToken()
 	r.cancel()
 }
 

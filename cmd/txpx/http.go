@@ -27,6 +27,9 @@ func NewAppTxPxHttpServer(
 ) *AppTxPxHttpServer {
 
 	binding := fmt.Sprintf(":%d", config.Port)
+	if !config.Prod {
+		binding = "localhost" + binding
+	}
 
 	return &AppTxPxHttpServer{
 		logger:   logger,

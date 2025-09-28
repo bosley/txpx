@@ -73,7 +73,13 @@ func main() {
 
 	instanceId := uuid.New().String()
 
-	txpxApp := NewAppTxPx(fmt.Sprintf("txpx-%s", instanceId), *usingInsi)
+	/*
+		Before we launch the app, we check to see if there are any cli arguments specific to
+		the app that we need to handle
+	*/
+	remainingArgs := flag.Args()
+
+	txpxApp := NewAppTxPx(fmt.Sprintf("txpx-%s", instanceId), *usingInsi, remainingArgs)
 
 	// insi
 	if *usingInsi {
@@ -111,19 +117,6 @@ func main() {
 
 	}
 
-	/*
-		Before we launch the app, we check to see if there are any cli arguments specific to
-		the app that we need to handle
-	*/
-	remainingArgs := flag.Args()
-
-	if len(remainingArgs) > 0 {
-		if err := executeCliArguments(remainingArgs, txpxApp); err != nil {
-			color.HiRed("Error: %v", err)
-			os.Exit(1)
-		}
-	}
-
 	opt := app.New(txpxApp)
 
 	application := opt.UnwrapOrElse(func() app.AppRuntime {
@@ -131,6 +124,14 @@ func main() {
 		os.Exit(1)
 		return nil
 	})
+
+	if len(remainingArgs) > 0 {
+		if err := executeCliArguments(remainingArgs, txpxApp, application); err != nil {
+			color.HiRed("Error executing cli arguments", "error", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	application.Launch()
 
@@ -240,10 +241,12 @@ type AppTxPx struct {
 	insidArgs       []string
 	insidController insid.Controller
 	insiCfg         *config.Cluster
+
+	appArgs []string
 }
 
 func NewAppTxPx(
-	identifier string, usingInsi bool) *AppTxPx {
+	identifier string, usingInsi bool, remainingArgs []string) *AppTxPx {
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -329,6 +332,7 @@ func NewAppTxPx(
 		config:     appCfg,
 		installDir: installDir,
 		insiCfg:    insiCfg,
+		appArgs:    remainingArgs,
 	}
 }
 
@@ -338,6 +342,10 @@ func (a *AppTxPx) SetupInsidPreLaunch(args []string) {
 
 func (a *AppTxPx) GetInstallDir() string {
 	return a.installDir
+}
+
+func (a *AppTxPx) GetAppSecret() string {
+	return a.config.Secret
 }
 
 var _ app.ApplicationCandidate = &AppTxPx{}
