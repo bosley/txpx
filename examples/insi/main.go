@@ -10,6 +10,7 @@ import (
 
 	"github.com/InsulaLabs/insi/client"
 	"github.com/bosley/txpx/pkg/app"
+	"github.com/bosley/txpx/pkg/events"
 	"github.com/fatih/color"
 )
 
@@ -43,6 +44,14 @@ func (d *DemoInsiApp) GetInsiEndpoints() []client.Endpoint {
 
 func (d *DemoInsiApp) GetInsiSkipVerify() bool {
 	return d.skipVerify
+}
+
+func (d *DemoInsiApp) GetAppSecret() string {
+	return "secret"
+}
+
+func (d *DemoInsiApp) APIHeaderExpectation() [4]byte {
+	return [4]byte{0, 0, 0, 0}
 }
 
 func (d *DemoInsiApp) Initialize(logger *slog.Logger, rt app.AppRuntimeSetup) error {
@@ -179,6 +188,10 @@ func (d *DemoInsiApp) GetIdentifier() string {
 
 func (d *DemoInsiApp) GetUptime() time.Duration {
 	return time.Since(d.startTime)
+}
+
+func (d *DemoInsiApp) OnApiEvent(event events.Event) {
+	color.HiMagenta("received event: %s", event.Body)
 }
 
 func main() {

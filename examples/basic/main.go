@@ -64,8 +64,12 @@ func (d *DemoHttpsApp) BindPublicRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/", d.handleRootGet())
 }
 
-func (d *DemoHttpsApp) GetApiMountPoint() string {
-	return "/api"
+func (d *DemoHttpsApp) GetAppSecret() string {
+	return "secret"
+}
+
+func (d *DemoHttpsApp) APIHeaderExpectation() [4]byte {
+	return [4]byte{0, 0, 0, 0}
 }
 
 func (d *DemoHttpsApp) OnEvent(event events.Event) {
@@ -181,6 +185,10 @@ func (d *DemoHttpsApp) handleRootGet() http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Hello, World! - Current Auth Token: " + d.rt.GetHttpPanel().BumpAuthToken()))
 	}
+}
+
+func (d *DemoHttpsApp) OnApiEvent(event events.Event) {
+	color.HiMagenta("received event: %s", event.Body)
 }
 
 func main() {

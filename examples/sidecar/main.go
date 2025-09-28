@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/bosley/txpx/pkg/app"
+	"github.com/bosley/txpx/pkg/events"
 	"github.com/bosley/txpx/pkg/procman"
 	"github.com/bosley/txpx/pkg/security"
 	"github.com/fatih/color"
@@ -71,15 +72,23 @@ func (d *DemoHttpsApp) GetKeyPath() string {
 	return filepath.Join(d.keysDir, "key.pem")
 }
 
+func (d *DemoHttpsApp) GetAppSecret() string {
+	return "secret"
+}
+
+func (d *DemoHttpsApp) APIHeaderExpectation() [4]byte {
+	return [4]byte{0, 0, 0, 0}
+}
+
+func (d *DemoHttpsApp) OnApiEvent(event events.Event) {
+	color.HiMagenta("received event: %s", event.Body)
+}
+
 func (d *DemoHttpsApp) BindPublicRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/", d.handleRootGet())
 	mux.HandleFunc("/sidecar/start", d.handleSidecarStart())
 	mux.HandleFunc("/sidecar/stop", d.handleSidecarStop())
 	mux.HandleFunc("/sidecar/status", d.handleSidecarStatus())
-}
-
-func (d *DemoHttpsApp) GetApiMountPoint() string {
-	return "/api"
 }
 
 // SideCar
