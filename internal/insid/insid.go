@@ -25,6 +25,7 @@ import (
 
 	"github.com/InsulaLabs/insi/client"
 	"github.com/InsulaLabs/insi/config"
+	"github.com/InsulaLabs/insi/db/core"
 	"github.com/InsulaLabs/insi/runtime"
 	"github.com/bosley/txpx/pkg/app"
 )
@@ -52,6 +53,7 @@ type Controller interface {
 		appRt app.AppRuntime,
 	) error
 	Stop()
+	WithAddedRoutes(routes core.RouteProvider)
 }
 
 var _ app.AppInsiBinder = &insidController{}
@@ -71,6 +73,8 @@ type insidController struct {
 	skipVerify    bool
 
 	appRt app.AppRuntime
+
+	routes core.RouteProvider
 }
 
 func NewController(
@@ -123,6 +127,10 @@ func (c *insidController) GetInsiEndpoints() []client.Endpoint {
 
 func (c *insidController) GetInsiSkipVerify() bool {
 	return c.skipVerify
+}
+
+func (c *insidController) WithAddedRoutes(routes core.RouteProvider) {
+	c.routes = routes
 }
 
 func (c *insidController) Start(
@@ -192,21 +200,23 @@ func (c *insidController) insidMain(ctx context.Context, errCh chan error, args 
 
 	// The default config file path can be set here
 	// It's passed to the runtime, which handles flag parsing for --config override.
-	rt, err := runtime.New(ctx, args, "cluster.yaml")
+	var err error
+	c.rt, err = runtime.New(ctx, args, "cluster.yaml")
 	if err != nil {
 		errCh <- err
 		return
 	}
 
-	c.running.Store(true)
+	if c.routes != nil {
+		c.rt = c.rt.WithRouteProvider(c.routes)
+	}
 
-	c.rt = rt
-	if err := rt.Run(); err != nil {
+	if err := c.rt.Run(); err != nil {
 		errCh <- err
 		return
 	}
 
-	rt.Wait()
+	c.rt.Wait()
 }
 
 /*

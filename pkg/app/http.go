@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -167,13 +168,17 @@ func (r *runtimeImpl) internalSetupHttpServer() {
 			select {
 			case <-r.ctx.Done():
 				r.cHttp.serverMu.RLock()
-				addr := r.cHttp.httpServer.Addr
-				server := r.cHttp.httpServer
-				r.cHttp.serverMu.RUnlock()
+				if r.cHttp.httpServer != nil {
+					addr := r.cHttp.httpServer.Addr
+					server := r.cHttp.httpServer
+					r.cHttp.serverMu.RUnlock()
 
-				r.logger.Info("Shutting down http server", "address", addr)
-				if err := server.Shutdown(r.ctx); err != nil {
-					r.logger.Error("Error shutting down http server", "error", err)
+					r.logger.Info("Shutting down http server", "address", addr)
+					if err := server.Shutdown(r.ctx); err != nil {
+						r.logger.Error("Error shutting down http server", "error", err)
+					}
+				} else {
+					r.cHttp.serverMu.RUnlock()
 				}
 				return
 			default:
@@ -284,16 +289,28 @@ func (rt *runtimeImpl) httpApiHandleRuntimePing(w http.ResponseWriter, r *http.R
 }
 
 func (rt *runtimeImpl) httpApiHandleRuntimeStatus(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	status := map[string]interface{}{
+		"status":     "running",
+		"uptime":     rt.candidate.GetAppMeta().GetUptime(),
+		"identifier": rt.candidate.GetAppMeta().GetIdentifier(),
+	}
 
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	if err := json.NewEncoder(w).Encode(status); err != nil {
+		rt.logger.Error("Failed to encode status response", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
 }
 
 func (rt *runtimeImpl) httpApiHandleRuntimeShutdown(w http.ResponseWriter, r *http.Request) {
 
+	w.Header().Set("Content-Type", "application/json")
+
 	if rt.isPerformingApiTriggeredShutdown.Load() {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		w.Write([]byte(`{"status": "shutdown already in progress"}`))
 		return
 	}
 
@@ -307,6 +324,7 @@ func (rt *runtimeImpl) httpApiHandleRuntimeShutdown(w http.ResponseWriter, r *ht
 	ctx, cancel := context.WithDeadline(rt.ctx, deadline)
 
 	go func() {
+		defer cancel()
 		for {
 			select {
 			case <-ctx.Done():
@@ -314,19 +332,24 @@ func (rt *runtimeImpl) httpApiHandleRuntimeShutdown(w http.ResponseWriter, r *ht
 				return
 			case <-time.After(1 * time.Second):
 				timeRemaining := deadline.Sub(time.Now())
-				rt.cEvents.apiHttpSubmitter.Submit(api.Msg{
+				if timeRemaining <= 0 {
+					rt.Shutdown()
+					return
+				}
+				if err := rt.cEvents.apiHttpSubmitter.Submit(api.Msg{
 					UUID:   uuid.New().String(),
 					Origin: api.DataOriginHTTP,
 					Request: api.ApiRequest{
 						Id:   api.ApiCommandIdRuntimeShutdown,
 						Data: timeRemaining,
 					},
-				})
+				}); err != nil {
+					rt.logger.Error("Failed to submit shutdown event", "error", err)
+				}
 			}
 		}
 	}()
-	defer cancel()
 
 	w.WriteHeader(http.StatusOK)
-	<-ctx.Done()
+	w.Write([]byte(`{"status": "shutdown initiated"}`))
 }
