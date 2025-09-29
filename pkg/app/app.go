@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"time"
 
+	"github.com/bosley/txpx/pkg/app/internal/api/v1"
 	"github.com/bosley/txpx/pkg/beau"
 	"github.com/bosley/txpx/pkg/events"
 	"github.com/bosley/txpx/pkg/pool"
@@ -17,6 +19,8 @@ import (
 type AppMetaStat interface {
 	GetIdentifier() string // Must be unique to all instances across all processes - this is how we specificly event-to-from each other
 	GetUptime() time.Duration
+
+	APIHeaderExpectation() [4]byte
 }
 
 type ApplicationCandidate interface {
@@ -26,6 +30,18 @@ type ApplicationCandidate interface {
 	) error
 
 	GetAppMeta() AppMetaStat
+
+	GetAppSecret() string
+
+	/*
+		A TX Event is a transaction event from the app backend.
+		This is required, even if no http insi fs et al are used
+		as this will be the async way that the app backend interfaces
+		and communicates with the app components.
+
+		The topic-locked publisher is provi
+	*/
+	OnApiEvent(event events.Event)
 
 	Main(ctx context.Context, rap AppRuntime)
 }
@@ -82,19 +98,25 @@ type AppRuntimeSetup interface {
 }
 
 type AppEventsPanel interface {
+	GetApi() api.API
 	GetTopicPublisher(topic string) (events.TopicPublisher, error)
 }
 
 type runtimeEventsConcern struct {
-	events       *events.EventManager
-	activeTopics map[string]string // topic handler id -> topic name
+	api    api.API
+	events *events.EventManager
+
+	apiHttpSubmitter api.APISubmitter
+	apiInsiSubmitter api.APISubmitter
+	activeTopics     map[string]string // topic handler id -> topic name
 }
 
 var _ AppEventsPanel = &runtimeEventsConcern{}
 
 type runtimeImpl struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx         context.Context
+	installPath string
+	cancel      context.CancelFunc
 
 	logger *slog.Logger
 
@@ -108,6 +130,9 @@ type runtimeImpl struct {
 	sideCarBinder AppExternalBinder
 	cInsi         runtimeInsiConcern
 	cEvents       runtimeEventsConcern
+
+	isPerformingApiTriggeredShutdown atomic.Bool
+	isShuttingDown                   atomic.Bool
 }
 
 var _ AppRuntime = &runtimeImpl{}
@@ -130,6 +155,10 @@ type dummyEventsPanel struct {
 
 func (d *dummyEventsPanel) GetTopicPublisher(topic string) (events.TopicPublisher, error) {
 	return nil, fmt.Errorf("events panel not initialized; were any topics requested?")
+}
+
+func (d *dummyEventsPanel) GetApi() api.API {
+	return nil
 }
 
 func (r *runtimeImpl) GetEventsPanel() AppEventsPanel {
@@ -215,19 +244,34 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 	}
 	eventsManager := events.NewEventManager(appRtCtx, &eventConfig)
 
+	if err := eventsManager.RegisterTopic(api.EventTopic); err != nil {
+		panic(err)
+	}
+	apiPublisher, err := eventsManager.GetTopicPublisher(api.EventTopic)
+	if err != nil {
+		panic(err)
+	}
+
+	appApi := api.New(
+		logger.With("runtime", "api"),
+		apiPublisher,
+	)
+
 	runtimeActual := &runtimeImpl{
-		ctx:       appRtCtx,
-		cancel:    appRtCancel,
-		logger:    logger.With("runtime", "app"),
-		candidate: candidate,
-		cFS: runtimeFSConcern{
-			fs:          xfs.NewDataStore(logger, appRtCtx, rts.installPath),
-			installPath: rts.installPath,
-		},
-		workPool: pool.NewBuilder().WithLogger(logger).Build(appRtCtx),
+		ctx:         appRtCtx,
+		cancel:      appRtCancel,
+		logger:      logger.With("runtime", "app"),
+		installPath: rts.installPath,
+		candidate:   candidate,
+		workPool:    pool.NewBuilder().WithLogger(logger).Build(appRtCtx),
+		// Note: CFS postponed until Launch to ensure we can have multiple instances of pre-launch + launched
+		// for cli driving
 		cHttp: runtimeHttpConcern{
 			httpServerBinder: rts.httpServerBinder,
 			currentAuthToken: "",
+			api:              appApi,
+			installDir:       rts.installPath,
+			secret:           candidate.GetAppSecret(),
 		},
 		cSideCar: runtimeSideCarConcern{
 			hostedApps: make(map[string]*procman.HostedApp),
@@ -242,8 +286,22 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 		cEvents: runtimeEventsConcern{
 			events:       eventsManager,
 			activeTopics: make(map[string]string),
+			api:          appApi,
+			apiHttpSubmitter: appApi.NewSubmiter(
+				candidate.GetAppMeta().APIHeaderExpectation(),
+				api.DataOriginHTTP,
+			),
+			apiInsiSubmitter: appApi.NewSubmiter(
+				candidate.GetAppMeta().APIHeaderExpectation(),
+				api.DataOriginInsi,
+			),
 		},
 	}
+
+	runtimeActual.cHttp.rt = runtimeActual
+
+	// Always listen on the tx topic to forward tx events to the candidate
+	rts.ListenOn(api.EventTopic, runtimeActual)
 
 	if rts.requestedTopics != nil {
 		for topic, handler := range rts.requestedTopics {
@@ -270,6 +328,12 @@ func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
 }
 
 func (r *runtimeImpl) Launch() {
+
+	r.cFS = runtimeFSConcern{
+		fs:          xfs.NewDataStore(r.logger, r.ctx, r.installPath),
+		installPath: r.installPath,
+	}
+
 	if r.cHttp.httpServerBinder != nil {
 		r.internalSetupHttpServer()
 	}
@@ -283,14 +347,49 @@ func (r *runtimeImpl) Launch() {
 }
 
 func (r *runtimeImpl) Shutdown() {
+
+	if r.isShuttingDown.Load() {
+		return
+	}
+
+	r.isShuttingDown.Store(true)
+	defer r.isShuttingDown.Store(false)
+
 	r.logger.Info("Shutting down application runtime")
 
 	if r.cSideCar.host != nil {
 		r.cSideCar.host.StopApp("*")
 	}
+	r.cHttp.cleanAuthToken()
 	r.cancel()
 }
 
 func (r *runtimeEventsConcern) GetTopicPublisher(topic string) (events.TopicPublisher, error) {
 	return r.events.GetTopicPublisher(topic)
+}
+
+func (r *runtimeEventsConcern) GetApi() api.API {
+	return r.api
+}
+
+var _ events.EventHandler = &runtimeImpl{}
+
+/*
+runtimeImpl implements the events.EventHandler interface
+to forward tx events to the candidate
+*/
+func (r *runtimeImpl) OnEvent(event events.Event) {
+	if r.candidate != nil {
+		r.candidate.OnApiEvent(event)
+	}
+}
+
+type txHandlerObject struct {
+	app *runtimeImpl
+}
+
+var _ events.EventHandler = &txHandlerObject{}
+
+func (t *txHandlerObject) OnEvent(event events.Event) {
+	t.app.OnEvent(event)
 }

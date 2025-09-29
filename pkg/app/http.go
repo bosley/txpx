@@ -1,13 +1,21 @@
 package app
 
 import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bosley/txpx/pkg/app/internal/api/v1"
 	"github.com/bosley/txpx/pkg/beau"
+	"github.com/bosley/txpx/pkg/security"
 	"github.com/google/uuid"
 )
 
@@ -15,6 +23,7 @@ const (
 	HttpAuthorizationHeader = "txpx-app-authorization"
 	HttpMaxRestartAttempts  = 3
 	HttpRestartDelay        = 2 * time.Second
+	HttpTxPxApiMountPoint   = "/txpx/api/v1"
 )
 
 /*
@@ -29,7 +38,12 @@ type AppHTTPBinder interface {
 	GetCertPath() string
 	GetKeyPath() string
 	BindPublicRoutes(mux *http.ServeMux)
-	GetApiMountPoint() string // where they want the application api to be mounted
+}
+
+type ApiClient interface {
+	Ping() error
+	Status() string
+	Shutdown() (string, error)
 }
 
 /*
@@ -41,20 +55,33 @@ type AppHttpPanel interface {
 	GetAuthorizationToken() string
 	BumpAuthToken() string
 	GetApiMountPoint() string
+
+	GetApiClient(skipTLSVerify bool) ApiClient // http backend client
 }
 
 type runtimeHttpConcern struct {
 	currentAuthToken string
+
+	rt *runtimeImpl
+
 	httpServerBinder AppHTTPBinder
-	apiMountPoint    string
 	httpServer       *http.Server
 	serverMu         sync.RWMutex
 
 	certPath string
 	keyPath  string
+
+	installDir string
+
+	secret string
+	api    api.API
 }
 
 var _ AppHttpPanel = &runtimeHttpConcern{}
+
+func (r *runtimeHttpConcern) cleanAuthToken() {
+	os.Remove(filepath.Join(r.installDir, "auth.token"))
+}
 
 func (r *runtimeHttpConcern) GetAuthorizationToken() string {
 	return r.currentAuthToken
@@ -63,11 +90,24 @@ func (r *runtimeHttpConcern) GetAuthorizationToken() string {
 func (r *runtimeHttpConcern) BumpAuthToken() string {
 	newToken := uuid.New().String()
 	r.currentAuthToken = newToken
+
+	go func() {
+		encryptedToken, err := security.Encrypt([]byte(newToken), r.secret)
+		if err != nil {
+			r.rt.logger.Error("Error encrypting auth token", "error", err)
+			return
+		}
+
+		if err := os.WriteFile(filepath.Join(r.installDir, "auth.token"), []byte(encryptedToken), 0600); err != nil {
+			r.rt.logger.Error("Error writing auth token file", "error", err)
+		}
+	}()
+
 	return newToken
 }
 
 func (r *runtimeHttpConcern) GetApiMountPoint() string {
-	return r.apiMountPoint
+	return HttpTxPxApiMountPoint
 }
 
 func (r *runtimeHttpConcern) GetCertPath() string {
@@ -98,6 +138,11 @@ func (r *runtimeImpl) GetHttpPanel() AppHttpPanel {
 func (r *runtimeImpl) internalSetupHttpServer() {
 
 	buildServer := func() {
+
+		// Since we are using the http endpoint, we need to ensure we have a token to secure the endpoint
+		// that can be cycled over time
+		r.cHttp.BumpAuthToken()
+
 		r.cHttp.serverMu.Lock()
 		defer r.cHttp.serverMu.Unlock()
 
@@ -107,8 +152,6 @@ func (r *runtimeImpl) internalSetupHttpServer() {
 		}
 
 		mux := http.NewServeMux()
-
-		r.cHttp.apiMountPoint = r.cHttp.httpServerBinder.GetApiMountPoint()
 
 		r.cHttp.certPath = r.cHttp.httpServerBinder.GetCertPath()
 		r.cHttp.keyPath = r.cHttp.httpServerBinder.GetKeyPath()
@@ -163,13 +206,17 @@ func (r *runtimeImpl) internalSetupHttpServer() {
 			select {
 			case <-r.ctx.Done():
 				r.cHttp.serverMu.RLock()
-				addr := r.cHttp.httpServer.Addr
-				server := r.cHttp.httpServer
-				r.cHttp.serverMu.RUnlock()
+				if r.cHttp.httpServer != nil {
+					addr := r.cHttp.httpServer.Addr
+					server := r.cHttp.httpServer
+					r.cHttp.serverMu.RUnlock()
 
-				r.logger.Info("Shutting down http server", "address", addr)
-				if err := server.Shutdown(r.ctx); err != nil {
-					r.logger.Error("Error shutting down http server", "error", err)
+					r.logger.Info("Shutting down http server", "address", addr)
+					if err := server.Shutdown(r.ctx); err != nil {
+						r.logger.Error("Error shutting down http server", "error", err)
+					}
+				} else {
+					r.cHttp.serverMu.RUnlock()
 				}
 				return
 			default:
@@ -224,28 +271,257 @@ func (r *runtimeImpl) internalSetupHttpServer() {
 
 func (rt *runtimeImpl) bindRuntimeApi(mux *http.ServeMux) {
 
-	mountPoint := rt.cHttp.httpServerBinder.GetApiMountPoint()
-
-	if mountPoint == "" {
-		mountPoint = "/_/api/v1"
-		rt.cHttp.apiMountPoint = mountPoint
-	}
-
-	if strings.HasSuffix(mountPoint, "/") {
-		mountPoint = mountPoint[:len(mountPoint)-1]
-	}
-
 	onRoute := func(x string) string {
 		if strings.HasPrefix(x, "/") {
 			x = x[1:]
 		}
-		return fmt.Sprintf("%s/%s", mountPoint, x)
+		return fmt.Sprintf("%s/%s", HttpTxPxApiMountPoint, x)
 	}
 
-	mux.HandleFunc(onRoute("runtime/ping"), rt.handleRuntimePing)
+	mux.HandleFunc(onRoute("/ping"), rt.httpApiHandleRuntimePing)
+
+	/*
+		These routes are protected by the UUID token that the app can
+		cycle by using BumpAuthToken() ensuting that only the owner
+		of the runtime interface can access these routes (from go)
+	*/
+	mux.Handle(onRoute("/status"), rt.httpTokenMiddleware(
+		http.HandlerFunc(rt.httpApiHandleRuntimeStatus),
+	))
+
+	// 10 second countdown before shutdown - events once per second
+	// to informt he app runtime that it should prepare for shutdown
+	mux.Handle(onRoute("/shutdown"), rt.httpTokenMiddleware(
+		http.HandlerFunc(rt.httpApiHandleRuntimeShutdown),
+	))
 }
 
-func (rt *runtimeImpl) handleRuntimePing(w http.ResponseWriter, r *http.Request) {
+/*
+Api Handlers for application runtime
+*/
+
+func (rt *runtimeImpl) httpTokenMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get(HttpAuthorizationHeader)
+
+		if rt.cHttp.currentAuthToken == "" {
+			rt.logger.Error("Unauthorized request; no token established to secure authentication")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		if token != rt.cHttp.currentAuthToken {
+			rt.logger.Error("Unauthorized request", "token", token)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (rt *runtimeImpl) httpApiHandleRuntimePing(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
+
+}
+
+func (rt *runtimeImpl) httpApiHandleRuntimeStatus(w http.ResponseWriter, r *http.Request) {
+	status := map[string]interface{}{
+		"status":     "running",
+		"uptime":     rt.candidate.GetAppMeta().GetUptime(),
+		"identifier": rt.candidate.GetAppMeta().GetIdentifier(),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	if err := json.NewEncoder(w).Encode(status); err != nil {
+		rt.logger.Error("Failed to encode status response", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
+func (rt *runtimeImpl) httpApiHandleRuntimeShutdown(w http.ResponseWriter, r *http.Request) {
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if rt.isPerformingApiTriggeredShutdown.Load() {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "shutdown already in progress"}`))
+		return
+	}
+
+	rt.isPerformingApiTriggeredShutdown.Store(true)
+
+	now := time.Now()
+	deadline := now.Add(10 * time.Second)
+
+	// Send event indicating shutdown with countdown once a second for 10 seconds
+	// then call rt.Shutdown()
+	ctx, cancel := context.WithDeadline(rt.ctx, deadline)
+
+	go func() {
+		defer cancel()
+		for {
+			select {
+			case <-ctx.Done():
+				rt.Shutdown()
+				return
+			case <-time.After(1 * time.Second):
+				timeRemaining := deadline.Sub(time.Now())
+				if timeRemaining <= 0 {
+					rt.Shutdown()
+					return
+				}
+				if err := rt.cEvents.apiHttpSubmitter.Submit(api.Msg{
+					UUID:   uuid.New().String(),
+					Origin: api.DataOriginHTTP,
+					Request: api.ApiRequest{
+						Id:   api.ApiCommandIdRuntimeShutdown,
+						Data: timeRemaining,
+					},
+				}); err != nil {
+					rt.logger.Error("Failed to submit shutdown event", "error", err)
+				}
+			}
+		}
+	}()
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status": "shutdown initiated"}`))
+}
+
+/*
+
+HTTP Client to talk to the api iteself
+
+*/
+
+func (r *runtimeHttpConcern) GetApiClient(skipTLSVerify bool) ApiClient {
+	return newHttpApiClient(r.rt, r, skipTLSVerify)
+}
+
+type httpApiClientImpl struct {
+	rt         *runtimeImpl
+	r          *runtimeHttpConcern
+	httpClient *http.Client
+}
+
+func newHttpApiClient(rt *runtimeImpl, r *runtimeHttpConcern, skipTLSVerify bool) *httpApiClientImpl {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: skipTLSVerify,
+		},
+	}
+
+	return &httpApiClientImpl{
+		rt: rt,
+		r:  r,
+		httpClient: &http.Client{
+			Timeout:   30 * time.Second,
+			Transport: transport,
+		},
+	}
+}
+
+func (h *httpApiClientImpl) doFetch(url string, method string, body io.Reader) (*http.Response, error) {
+	authToken, err := os.ReadFile(filepath.Join(h.r.installDir, "auth.token"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("auth.token file not found; is the server running?")
+		}
+		return nil, err
+	}
+
+	decryptedToken, err := security.Decrypt(string(authToken), h.r.secret)
+	if err != nil {
+		return nil, err
+	}
+
+	attemptRequest := func(targetUrl string) (*http.Response, error) {
+		req, err := http.NewRequest(method, targetUrl, body)
+		if err != nil {
+			h.rt.logger.Error("Failed to create request", "error", err)
+			return nil, err
+		}
+
+		req.Header.Set(HttpAuthorizationHeader, string(decryptedToken))
+		return h.httpClient.Do(req)
+	}
+
+	return attemptRequest(url)
+}
+
+func (h *httpApiClientImpl) makeUrl(path string) string {
+	binding := h.rt.cHttp.httpServerBinder.GetBinding()
+	keyPathSet := h.rt.cHttp.httpServerBinder.GetKeyPath() != ""
+	certPathSet := h.rt.cHttp.httpServerBinder.GetCertPath() != ""
+
+	protocol := "http"
+	if keyPathSet && certPathSet {
+		protocol = "https"
+	}
+	return fmt.Sprintf("%s://%s%s%s", protocol, binding, HttpTxPxApiMountPoint, path)
+}
+
+func (h *httpApiClientImpl) Ping() error {
+
+	url := h.makeUrl("/ping")
+
+	resp, err := h.doFetch(url, "GET", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ping failed with status: %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+func (h *httpApiClientImpl) Status() string {
+	url := h.makeUrl("/status")
+
+	resp, err := h.doFetch(url, "GET", nil)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.rt.logger.Error("Failed to read status response body", "error", err)
+		return ""
+	}
+
+	return string(body)
+}
+
+func (h *httpApiClientImpl) Shutdown() (string, error) {
+	url := h.makeUrl("/shutdown")
+
+	resp, err := h.doFetch(url, "POST", nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("shutdown failed with status: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.rt.logger.Error("Failed to read shutdown response body", "error", err)
+		return "", err
+	}
+
+	return string(body), nil
 }

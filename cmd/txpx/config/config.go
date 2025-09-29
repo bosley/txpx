@@ -1,11 +1,10 @@
-package main
+package config
 
 import (
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/fatih/color"
 	"gopkg.in/yaml.v3"
 )
 
@@ -107,12 +106,6 @@ func LoadConfig(path string) (*Config, error) {
 
 	if _, exists := config.RateLimiters["authorized_users"]; !exists {
 		config.RateLimiters["authorized_users"] = RateLimiter{Limit: 100, Burst: 150}
-	}
-
-	if config.Prod {
-		color.HiMagenta("running in production mode")
-	} else {
-		color.HiCyan("running in development mode")
 	}
 
 	return &config, nil

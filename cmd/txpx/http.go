@@ -5,7 +5,11 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/bosley/txpx/cmd/txpx/config"
+	"github.com/bosley/txpx/internal/router"
+	"github.com/bosley/txpx/internal/views"
 	"github.com/bosley/txpx/pkg/app"
+	"github.com/bosley/txpx/pkg/datascape"
 	"github.com/bosley/txpx/pkg/events"
 )
 
@@ -15,18 +19,28 @@ type AppTxPxHttpServer struct {
 	binding      string
 	certPath     string
 	keyPath      string
-	config       *Config
+	config       *config.Config
 	eventHandler *AppTxPxHttpServerEventHandler
 
 	app *AppTxPx
+
+	serverRouter *router.Router
 }
 
 func NewAppTxPxHttpServer(
 	logger *slog.Logger,
-	config *Config,
+	config *config.Config,
+	viewManager *views.ViewManager,
 ) *AppTxPxHttpServer {
 
 	binding := fmt.Sprintf(":%d", config.Port)
+	if !config.Prod {
+		binding = "localhost" + binding
+	}
+
+	siteControllers := datascape.New(
+		logger.WithGroup("controllers"),
+	)
 
 	return &AppTxPxHttpServer{
 		logger:   logger,
@@ -38,6 +52,13 @@ func NewAppTxPxHttpServer(
 			app: nil,
 		},
 		app: nil,
+		serverRouter: router.New(
+			logger,
+			config.Prod,
+			config.URL,
+			viewManager,
+			siteControllers,
+		),
 	}
 }
 
@@ -50,7 +71,7 @@ func (a *AppTxPxHttpServer) Initialize(rt app.AppRuntimeSetup) error {
 
 	// listen on the http-server topic so we can receive events from other
 	// app modules that might relate to us at runtime
-	rt.ListenOn(EventTopicTxPxHttpServer, a.eventHandler)
+	rt.ListenOn(config.EventTopicTxPxHttpServer, a.eventHandler)
 
 	return nil
 }
@@ -72,12 +93,8 @@ func (a *AppTxPxHttpServer) GetKeyPath() string {
 	return a.keyPath
 }
 
-func (a *AppTxPxHttpServer) GetApiMountPoint() string {
-	return "/api"
-}
-
 func (a *AppTxPxHttpServer) BindPublicRoutes(mux *http.ServeMux) {
-	a.bindHandlers(mux)
+	a.serverRouter.Bind(mux)
 }
 
 /*
@@ -92,19 +109,4 @@ var _ events.EventHandler = &AppTxPxHttpServerEventHandler{}
 
 func (a *AppTxPxHttpServerEventHandler) OnEvent(event events.Event) {
 	a.app.logger.Info("received event", "event", event)
-}
-
-/*
-HTTP Handlers
-*/
-
-func (a *AppTxPxHttpServer) bindHandlers(mux *http.ServeMux) {
-	mux.HandleFunc("/", a.handleRootGet())
-}
-
-func (a *AppTxPxHttpServer) handleRootGet() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Hello, World!"))
-	}
 }
