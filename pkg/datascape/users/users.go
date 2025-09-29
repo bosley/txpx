@@ -2,9 +2,10 @@ package users
 
 import (
 	"errors"
+	"log/slog"
 	"time"
 
-	"github.com/bosley/txpx/internal/models"
+	"github.com/bosley/txpx/pkg/datascape/models"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -51,14 +52,16 @@ type Users interface {
 }
 
 type usersImpl struct {
+	logger    *slog.Logger
 	mockUsers map[string]*models.User
 	mockEmail map[string]string
 }
 
 var _ Users = &usersImpl{}
 
-func New() Users {
+func New(logger *slog.Logger) Users {
 	return &usersImpl{
+		logger:    logger,
 		mockUsers: make(map[string]*models.User),
 		mockEmail: make(map[string]string),
 	}
@@ -81,11 +84,13 @@ func VerifyUserPassword(password string, hashedPassword string) bool {
 
 func (x *usersImpl) CreateUser(email string, password string) (*models.User, error) {
 	if _, exists := x.mockEmail[email]; exists {
+		x.logger.Error("email already in use", "email", email)
 		return nil, ErrEmailInUse
 	}
 
 	hashedPassword, err := HashUserPassword(password)
 	if err != nil {
+		x.logger.Error("failed to hash user password", "error", err)
 		return nil, err
 	}
 
@@ -106,6 +111,7 @@ func (x *usersImpl) GetUserByEmail(email string) (*models.User, error) {
 	if uuid, exists := x.mockEmail[email]; exists {
 		return x.mockUsers[uuid], nil
 	}
+	x.logger.Error("user not found", "email", email)
 	return nil, ErrUserNotFound
 }
 
@@ -130,11 +136,13 @@ func (x *usersImpl) UpdateUserName(userUUID string, name string) (*models.User, 
 		user.UpdatedAt = time.Now()
 		return user, nil
 	}
+	x.logger.Error("user not found", "user_uuid", userUUID)
 	return nil, ErrUserNotFound
 }
 
 func (x *usersImpl) UpdateUserEmail(userUUID string, email string) (*models.User, error) {
 	if _, exists := x.mockEmail[email]; exists {
+		x.logger.Error("email already in use", "email", email)
 		return nil, ErrEmailInUse
 	}
 
@@ -145,6 +153,7 @@ func (x *usersImpl) UpdateUserEmail(userUUID string, email string) (*models.User
 		x.mockEmail[email] = userUUID
 		return user, nil
 	}
+	x.logger.Error("user not found", "user_uuid", userUUID)
 	return nil, ErrUserNotFound
 }
 
@@ -152,12 +161,14 @@ func (x *usersImpl) UpdateUserPassword(userUUID string, password string) (*model
 	if user, exists := x.mockUsers[userUUID]; exists {
 		hashedPassword, err := HashUserPassword(password)
 		if err != nil {
+			x.logger.Error("failed to hash user password", "error", err)
 			return nil, err
 		}
 		user.Password = hashedPassword
 		user.UpdatedAt = time.Now()
 		return user, nil
 	}
+	x.logger.Error("user not found", "user_uuid", userUUID)
 	return nil, ErrUserNotFound
 }
 
@@ -167,5 +178,6 @@ func (x *usersImpl) DeleteUser(userUUID string) error {
 		delete(x.mockUsers, userUUID)
 		return nil
 	}
+	x.logger.Error("user not found", "user_uuid", userUUID)
 	return ErrUserNotFound
 }

@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 )
 
 const (
 	CSRFTokenExpiration = 30 * time.Minute
+	SessionCookieName   = "txpx_session"
 )
 
 var (
@@ -46,4 +48,28 @@ func (x *UserSession) BumpCSRF() {
 	hash := sha256.Sum256([]byte(val))
 	x.NextCSRF = hex.EncodeToString(hash[:])
 	x.LastIssuedCSRF = time.Now()
+}
+
+func (x *UserSession) SetCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     SessionCookieName,
+		Value:    x.UUID,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		Path:     "/",
+		Expires:  x.ExpiresAt,
+	})
+}
+
+func (x *UserSession) DeleteCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     SessionCookieName,
+		Value:    "",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		Path:     "/",
+		MaxAge:   -1,
+	})
 }

@@ -1,6 +1,7 @@
 package users
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -9,7 +10,8 @@ import (
 )
 
 func setupTest(t *testing.T) Users {
-	return New()
+	logger := slog.Default()
+	return New(logger)
 }
 
 func TestCreateUser(t *testing.T) {

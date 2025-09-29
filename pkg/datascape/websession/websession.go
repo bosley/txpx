@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/bosley/txpx/internal/controllers/users"
-	"github.com/bosley/txpx/internal/models"
+	"github.com/bosley/txpx/pkg/datascape/models"
+	"github.com/bosley/txpx/pkg/datascape/users"
 	"github.com/google/uuid"
 )
 

@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bosley/txpx/internal/controllers/users"
-	"github.com/bosley/txpx/internal/models"
+	"github.com/bosley/txpx/pkg/datascape/models"
+	"github.com/bosley/txpx/pkg/datascape/users"
 )
 
 func setupTest(t *testing.T) (Keys, users.Users, *models.User) {
 	logger := slog.Default()
-	userController := users.New()
+	userController := users.New(logger.WithGroup("users"))
 	keysController := New(logger.WithGroup("keys"), userController)
 
 	user, err := userController.CreateUser("test@example.com", "password123")

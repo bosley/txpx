@@ -6,10 +6,10 @@ import (
 	"net/http"
 
 	"github.com/bosley/txpx/cmd/txpx/config"
-	"github.com/bosley/txpx/internal/controllers"
 	"github.com/bosley/txpx/internal/router"
 	"github.com/bosley/txpx/internal/views"
 	"github.com/bosley/txpx/pkg/app"
+	"github.com/bosley/txpx/pkg/datascape"
 	"github.com/bosley/txpx/pkg/events"
 )
 
@@ -38,7 +38,9 @@ func NewAppTxPxHttpServer(
 		binding = "localhost" + binding
 	}
 
-	siteControllers := controllers.New()
+	siteControllers := datascape.New(
+		logger.WithGroup("controllers"),
+	)
 
 	return &AppTxPxHttpServer{
 		logger:   logger,

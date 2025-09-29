@@ -11,6 +11,7 @@ type LoginPageData struct {
 
 type UserDashboardPageData struct {
 	CSRFToken string
+	UserEmail string
 }
 
 func (x *LandingPageData) toData() map[string]any {
@@ -29,5 +30,6 @@ func (x *LoginPageData) toData() map[string]any {
 func (x *UserDashboardPageData) toData() map[string]any {
 	return map[string]any{
 		"CSRFToken": x.CSRFToken,
+		"UserEmail": x.UserEmail,
 	}
 }

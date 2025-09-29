@@ -5,14 +5,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bosley/txpx/internal/controllers/users"
+	"github.com/bosley/txpx/pkg/datascape/users"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func setupTest(t *testing.T) WebSession {
 	logger := slog.Default()
-	userController := users.New()
+	userController := users.New(logger.WithGroup("users"))
 	return New(logger, userController)
 }
 
