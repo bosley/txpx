@@ -2,18 +2,115 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/bosley/txpx/pkg/datascape"
 	"github.com/bosley/txpx/pkg/datascape/models"
+	"github.com/jellydator/ttlcache/v3"
+	"golang.org/x/time/rate"
 )
 
 const (
 	csrfHeaderName = "X-CSRF-Token"
 )
+
+type CORSConfig struct {
+	AllowOrigins     []string
+	AllowMethods     []string
+	AllowHeaders     []string
+	ExposeHeaders    []string
+	AllowCredentials bool
+	MaxAge           int
+}
+
+func NewCORSConfig() *CORSConfig {
+	return &CORSConfig{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Accept", "Content-Type", "Content-Length", "Accept-Encoding", "Authorization", csrfHeaderName},
+		ExposeHeaders:    []string{csrfHeaderName},
+		AllowCredentials: false,
+		MaxAge:           86400,
+	}
+}
+
+func (c *CORSConfig) WithOrigins(origins ...string) *CORSConfig {
+	c.AllowOrigins = origins
+	return c
+}
+
+func (c *CORSConfig) WithMethods(methods ...string) *CORSConfig {
+	c.AllowMethods = methods
+	return c
+}
+
+func (c *CORSConfig) WithHeaders(headers ...string) *CORSConfig {
+	c.AllowHeaders = headers
+	return c
+}
+
+func (c *CORSConfig) WithCredentials(allow bool) *CORSConfig {
+	c.AllowCredentials = allow
+	return c
+}
+
+func (c *CORSConfig) WithMaxAge(seconds int) *CORSConfig {
+	c.MaxAge = seconds
+	return c
+}
+
+func CORSAllowAll() CORSConfig {
+	return CORSConfig{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"*"},
+		AllowHeaders:     []string{"*"},
+		AllowCredentials: false,
+		MaxAge:           86400,
+	}
+}
+
+func CORSSameOrigin() CORSConfig {
+	return CORSConfig{
+		AllowOrigins:     []string{},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Accept", "Content-Type", "Content-Length", "Accept-Encoding", "Authorization", csrfHeaderName, "Stripe-Signature"},
+		ExposeHeaders:    []string{csrfHeaderName, "Request-Id", "Stripe-Request-Id"},
+		AllowCredentials: true,
+		MaxAge:           86400,
+	}
+}
+
+func CORSForDevelopment(devOrigins ...string) CORSConfig {
+	if len(devOrigins) == 0 {
+		devOrigins = []string{"http://localhost:3000", "http://localhost:5173", "http://localhost:8080"}
+	}
+	return CORSConfig{
+		AllowOrigins:     devOrigins,
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
+		AllowHeaders:     []string{"*"},
+		ExposeHeaders:    []string{csrfHeaderName},
+		AllowCredentials: true,
+		MaxAge:           3600,
+	}
+}
+
+func CORSForStripe(allowedOrigins ...string) CORSConfig {
+	// Stripe Connect might redirect from https://connect.stripe.com
+	origins := append([]string{"https://checkout.stripe.com", "https://js.stripe.com"}, allowedOrigins...)
+	return CORSConfig{
+		AllowOrigins:     origins,
+		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
+		AllowHeaders:     []string{"Accept", "Content-Type", "Content-Length", "Accept-Encoding", "Authorization", csrfHeaderName, "Stripe-Signature"},
+		ExposeHeaders:    []string{csrfHeaderName, "Request-Id", "Stripe-Request-Id"},
+		AllowCredentials: true,
+		MaxAge:           86400,
+	}
+}
 
 type contextKey string
 
@@ -32,6 +129,76 @@ func GetUser(r *http.Request) (*models.User, bool) {
 	return user, ok
 }
 
+func (m *middlewareBuilder) corsMiddleware(config CORSConfig) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+
+			// Skip CORS for requests without Origin header (server-to-server like webhooks)
+			if origin == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Check if origin is allowed
+			originAllowed := false
+			if len(config.AllowOrigins) == 0 {
+				// Empty AllowOrigins means same-origin only
+				// Browser will handle same-origin, we just don't set CORS headers
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			for _, allowedOrigin := range config.AllowOrigins {
+				if allowedOrigin == "*" || allowedOrigin == origin {
+					originAllowed = true
+					break
+				}
+			}
+
+			if !originAllowed {
+				// Origin not allowed, don't set CORS headers
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Set CORS headers
+			if origin != "" && originAllowed {
+				if len(config.AllowOrigins) > 0 && config.AllowOrigins[0] == "*" && !config.AllowCredentials {
+					w.Header().Set("Access-Control-Allow-Origin", "*")
+				} else {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+				}
+			}
+
+			if config.AllowCredentials {
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
+
+			if len(config.ExposeHeaders) > 0 {
+				w.Header().Set("Access-Control-Expose-Headers", strings.Join(config.ExposeHeaders, ", "))
+			}
+
+			// Handle preflight requests
+			if r.Method == "OPTIONS" {
+				if len(config.AllowMethods) > 0 {
+					w.Header().Set("Access-Control-Allow-Methods", strings.Join(config.AllowMethods, ", "))
+				}
+				if len(config.AllowHeaders) > 0 {
+					w.Header().Set("Access-Control-Allow-Headers", strings.Join(config.AllowHeaders, ", "))
+				}
+				if config.MaxAge > 0 {
+					w.Header().Set("Access-Control-Max-Age", fmt.Sprintf("%d", config.MaxAge))
+				}
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 type MiddlewareBuilder interface {
 	WithLogger(logger *slog.Logger) MiddlewareBuilder
 	WithRateLimitPerOriginMiddleware(maxRequests int, per time.Duration) MiddlewareBuilder // for non-logged in users
@@ -39,6 +206,7 @@ type MiddlewareBuilder interface {
 	WithWebSessionMiddleware(sessionDuration time.Duration, publicPaths []string, loginPath string, redirectIfAuthenticated map[string]string) MiddlewareBuilder
 	WithRateLimitPerUserMiddleware(maxRequests int, per time.Duration) MiddlewareBuilder // rate limit per user, per endpoint
 	WithRateLimitPerRefererMiddleware(maxRequests int, per time.Duration, trustedProxies []string) MiddlewareBuilder
+	WithCORSMiddleware(corsConfig CORSConfig) MiddlewareBuilder
 	Build() http.Handler
 }
 
@@ -50,8 +218,39 @@ type middlewareBuilder struct {
 }
 
 type rateLimiter struct {
-	requests map[string][]time.Time
-	mu       sync.Mutex
+	limiters sync.Map
+	cache    *ttlcache.Cache[string, *rate.Limiter]
+	rate     rate.Limit
+	burst    int
+}
+
+func newRateLimiter(maxRequests int, per time.Duration) *rateLimiter {
+	rl := &rateLimiter{
+		rate:  rate.Limit(float64(maxRequests) / per.Seconds()),
+		burst: maxRequests,
+	}
+	rl.cache = ttlcache.New[string, *rate.Limiter](
+		ttlcache.WithTTL[string, *rate.Limiter](10*time.Minute),
+		ttlcache.WithDisableTouchOnHit[string, *rate.Limiter](),
+	)
+	rl.cache.OnEviction(func(ctx context.Context, reason ttlcache.EvictionReason, item *ttlcache.Item[string, *rate.Limiter]) {
+		if reason == ttlcache.EvictionReasonExpired {
+			rl.limiters.Delete(item.Key())
+		}
+	})
+	go rl.cache.Start()
+	return rl
+}
+
+func (rl *rateLimiter) getLimiter(key string) *rate.Limiter {
+	if limiter, ok := rl.limiters.Load(key); ok {
+		rl.cache.Set(key, limiter.(*rate.Limiter), ttlcache.DefaultTTL)
+		return limiter.(*rate.Limiter)
+	}
+	limiter := rate.NewLimiter(rl.rate, rl.burst)
+	rl.limiters.Store(key, limiter)
+	rl.cache.Set(key, limiter, ttlcache.DefaultTTL)
+	return limiter
 }
 
 func New(
@@ -97,6 +296,11 @@ func (m *middlewareBuilder) WithRateLimitPerRefererMiddleware(maxRequests int, p
 	return m
 }
 
+func (m *middlewareBuilder) WithCORSMiddleware(corsConfig CORSConfig) MiddlewareBuilder {
+	m.middleware = append(m.middleware, m.corsMiddleware(corsConfig))
+	return m
+}
+
 func (m *middlewareBuilder) Build() http.Handler {
 	handler := m.handler
 	for i := len(m.middleware) - 1; i >= 0; i-- {
@@ -106,17 +310,13 @@ func (m *middlewareBuilder) Build() http.Handler {
 }
 
 func (m *middlewareBuilder) rateLimitPerOriginMiddleware(maxRequests int, per time.Duration) func(http.Handler) http.Handler {
-	limiter := &rateLimiter{
-		requests: make(map[string][]time.Time),
-	}
+	rl := newRateLimiter(maxRequests, per)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Check if user has a valid session - authenticated users bypass origin limits
 			if cookie, err := r.Cookie(models.SessionCookieName); err == nil && cookie.Value != "" {
 				if session, err := m.datascape.GetWebsessionController().GetWebSession(cookie.Value); err == nil {
 					if session.ExpiresAt.After(time.Now()) {
-						// Valid session found, skip origin rate limiting
 						next.ServeHTTP(w, r)
 						return
 					}
@@ -128,28 +328,12 @@ func (m *middlewareBuilder) rateLimitPerOriginMiddleware(maxRequests int, per ti
 				origin = forwardedFor
 			}
 
-			limiter.mu.Lock()
-			now := time.Now()
-			if _, exists := limiter.requests[origin]; !exists {
-				limiter.requests[origin] = []time.Time{}
-			}
-
-			validRequests := []time.Time{}
-			for _, t := range limiter.requests[origin] {
-				if now.Sub(t) < per {
-					validRequests = append(validRequests, t)
-				}
-			}
-
-			if len(validRequests) >= maxRequests {
-				limiter.mu.Unlock()
+			limiter := rl.getLimiter(origin)
+			if !limiter.Allow() {
 				m.logger.Warn("rate limit exceeded", "origin", origin, "path", r.URL.Path)
 				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 				return
 			}
-
-			limiter.requests[origin] = append(validRequests, now)
-			limiter.mu.Unlock()
 
 			next.ServeHTTP(w, r)
 		})
@@ -250,9 +434,7 @@ func (m *middlewareBuilder) webSessionMiddleware(sessionDuration time.Duration, 
 }
 
 func (m *middlewareBuilder) rateLimitPerUserMiddleware(maxRequests int, per time.Duration) func(http.Handler) http.Handler {
-	limiter := &rateLimiter{
-		requests: make(map[string][]time.Time),
-	}
+	rl := newRateLimiter(maxRequests, per)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -263,29 +445,12 @@ func (m *middlewareBuilder) rateLimitPerUserMiddleware(maxRequests int, per time
 			}
 
 			key := user.UUID + ":" + r.URL.Path
-
-			limiter.mu.Lock()
-			now := time.Now()
-			if _, exists := limiter.requests[key]; !exists {
-				limiter.requests[key] = []time.Time{}
-			}
-
-			validRequests := []time.Time{}
-			for _, t := range limiter.requests[key] {
-				if now.Sub(t) < per {
-					validRequests = append(validRequests, t)
-				}
-			}
-
-			if len(validRequests) >= maxRequests {
-				limiter.mu.Unlock()
+			limiter := rl.getLimiter(key)
+			if !limiter.Allow() {
 				m.logger.Warn("user rate limit exceeded", "user_uuid", user.UUID, "path", r.URL.Path)
 				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 				return
 			}
-
-			limiter.requests[key] = append(validRequests, now)
-			limiter.mu.Unlock()
 
 			next.ServeHTTP(w, r)
 		})
@@ -293,9 +458,7 @@ func (m *middlewareBuilder) rateLimitPerUserMiddleware(maxRequests int, per time
 }
 
 func (m *middlewareBuilder) rateLimitPerRefererMiddleware(maxRequests int, per time.Duration, trustedProxies []string) func(http.Handler) http.Handler {
-	limiter := &rateLimiter{
-		requests: make(map[string][]time.Time),
-	}
+	rl := newRateLimiter(maxRequests, per)
 
 	trustedProxyMap := make(map[string]bool)
 	for _, proxy := range trustedProxies {
@@ -320,28 +483,12 @@ func (m *middlewareBuilder) rateLimitPerRefererMiddleware(maxRequests int, per t
 				return
 			}
 
-			limiter.mu.Lock()
-			now := time.Now()
-			if _, exists := limiter.requests[referer]; !exists {
-				limiter.requests[referer] = []time.Time{}
-			}
-
-			validRequests := []time.Time{}
-			for _, t := range limiter.requests[referer] {
-				if now.Sub(t) < per {
-					validRequests = append(validRequests, t)
-				}
-			}
-
-			if len(validRequests) >= maxRequests {
-				limiter.mu.Unlock()
+			limiter := rl.getLimiter(referer)
+			if !limiter.Allow() {
 				m.logger.Warn("referer rate limit exceeded", "referer", referer, "path", r.URL.Path)
 				http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 				return
 			}
-
-			limiter.requests[referer] = append(validRequests, now)
-			limiter.mu.Unlock()
 
 			next.ServeHTTP(w, r)
 		})

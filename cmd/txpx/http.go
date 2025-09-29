@@ -54,6 +54,8 @@ func NewAppTxPxHttpServer(
 		app: nil,
 		serverRouter: router.New(
 			logger,
+			config.Prod,
+			config.URL,
 			viewManager,
 			siteControllers,
 		),

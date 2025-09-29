@@ -15,13 +15,17 @@ import (
 )
 
 type Router struct {
-	logger      *slog.Logger
-	viewManager *views.ViewManager
-	controllers datascape.Controllers
+	logger       *slog.Logger
+	viewManager  *views.ViewManager
+	controllers  datascape.Controllers
+	inProduction bool
+	url          string
 }
 
 func New(
 	logger *slog.Logger,
+	inProduction bool,
+	url string,
 	viewManager *views.ViewManager,
 	controllers datascape.Controllers,
 ) *Router {
@@ -34,9 +38,11 @@ func New(
 	}
 
 	return &Router{
-		logger:      logger,
-		viewManager: viewManager,
-		controllers: controllers,
+		logger:       logger,
+		viewManager:  viewManager,
+		controllers:  controllers,
+		inProduction: inProduction,
+		url:          url,
 	}
 }
 
@@ -53,6 +59,15 @@ func (x *Router) Bind(mux *http.ServeMux) {
 		All "non public" routes that require posting data are protected by
 		a CSRF token that is generated per-session and validated against
 		the user's session.
+
+		CORS Examples:
+		- middleware.CORSSameOrigin() - Default, only same-origin requests
+		- middleware.CORSAllowAll() - Allow all origins (NOT for production)
+		- middleware.CORSForDevelopment() - Common dev server ports
+		- middleware.CORSForDevelopment("http://localhost:4200") - Custom dev ports
+		- middleware.CORSForStripe("https://myapp.com") - Stripe checkout + your origins
+		- middleware.NewCORSConfig().WithOrigins("https://app.example.com").WithCredentials(true)
+		- middleware.NewCORSConfig().WithOrigins("https://app1.example.com", "https://app2.example.com")
 	*/
 	publicPaths := []string{"/", "/login", "/styles.css"}
 	redirectIfAuthenticated := map[string]string{
@@ -66,11 +81,19 @@ func (x *Router) Bind(mux *http.ServeMux) {
 	internalMux.HandleFunc("/dashboard", x.handleDashboardGet())
 	internalMux.HandleFunc("/logout", x.handleLogout())
 
+	var corsConfig middleware.CORSConfig
+	if x.inProduction {
+		corsConfig = middleware.CORSForStripe(x.url)
+	} else {
+		corsConfig = middleware.CORSForDevelopment()
+	}
+
 	handler := middleware.New(
 		x.logger.WithGroup("middleware"),
 		x.controllers,
 		internalMux,
-	).WithRateLimitPerOriginMiddleware(100, time.Minute).
+	).WithCORSMiddleware(corsConfig).
+		WithRateLimitPerOriginMiddleware(100, time.Minute).
 		WithWebSessionMiddleware(24*time.Hour, publicPaths, "/login", redirectIfAuthenticated).
 		WithCSRFMiddleware().
 		WithRateLimitPerUserMiddleware(500, time.Minute).
