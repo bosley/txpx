@@ -25,6 +25,7 @@ type AppTxPxHttpServer struct {
 	app *AppTxPx
 
 	serverRouter *router.Router
+	viewManager  *views.ViewManager
 }
 
 func NewAppTxPxHttpServer(
@@ -38,10 +39,6 @@ func NewAppTxPxHttpServer(
 		binding = "localhost" + binding
 	}
 
-	siteControllers := datascape.New(
-		logger.WithGroup("controllers"),
-	)
-
 	return &AppTxPxHttpServer{
 		logger:   logger,
 		binding:  binding,
@@ -51,14 +48,8 @@ func NewAppTxPxHttpServer(
 		eventHandler: &AppTxPxHttpServerEventHandler{
 			app: nil,
 		},
-		app: nil,
-		serverRouter: router.New(
-			logger,
-			config.Prod,
-			config.URL,
-			viewManager,
-			siteControllers,
-		),
+		app:         nil,
+		viewManager: viewManager,
 	}
 }
 
@@ -93,7 +84,14 @@ func (a *AppTxPxHttpServer) GetKeyPath() string {
 	return a.keyPath
 }
 
-func (a *AppTxPxHttpServer) BindPublicRoutes(mux *http.ServeMux) {
+func (a *AppTxPxHttpServer) BindPublicRoutes(mux *http.ServeMux, controllers datascape.Controllers) {
+	a.serverRouter = router.New(
+		a.logger,
+		a.config.Prod,
+		a.config.URL,
+		a.viewManager,
+		controllers,
+	)
 	a.serverRouter.Bind(mux)
 }
 

@@ -37,6 +37,23 @@ var cmdMap = map[string]cliCommand{
 			},
 		},
 	},
+	"users": {
+		description: "User management commands",
+		subcommands: map[string]cliSubcommand{
+			"list": {
+				description: "List all users",
+				action:      subCmdUsersList,
+			},
+			"create": {
+				description: "Create a new user (usage: users create <email> <password>)",
+				action:      subCmdUsersCreate,
+			},
+			"delete": {
+				description: "Delete a user (usage: users delete <user_uuid>)",
+				action:      subCmdUsersDelete,
+			},
+		},
+	},
 }
 
 func showCliUsage() {
@@ -106,4 +123,48 @@ func subCmdAppShutdown(app *AppTxPx, remainingArgs []string, application app.App
 		return
 	}
 	fmt.Println("Message:", msg)
+}
+
+func subCmdUsersList(app *AppTxPx, remainingArgs []string, application app.AppRuntime) {
+	result, err := application.GetHttpPanel().GetApiClient(shouldSkipTLSVerify(app.config)).ListUsers()
+	if err != nil {
+		fmt.Println("Failed to list users:", err)
+		return
+	}
+	fmt.Println(result)
+}
+
+func subCmdUsersCreate(app *AppTxPx, remainingArgs []string, application app.AppRuntime) {
+	if len(remainingArgs) < 2 {
+		fmt.Println("Error: email and password are required")
+		fmt.Println("Usage: users create <email> <password>")
+		os.Exit(1)
+	}
+
+	email := remainingArgs[0]
+	password := remainingArgs[1]
+
+	result, err := application.GetHttpPanel().GetApiClient(shouldSkipTLSVerify(app.config)).CreateUser(email, password)
+	if err != nil {
+		fmt.Println("Failed to create user:", err)
+		return
+	}
+	fmt.Println(result)
+}
+
+func subCmdUsersDelete(app *AppTxPx, remainingArgs []string, application app.AppRuntime) {
+	if len(remainingArgs) < 1 {
+		fmt.Println("Error: user_uuid is required")
+		fmt.Println("Usage: users delete <user_uuid>")
+		os.Exit(1)
+	}
+
+	userUUID := remainingArgs[0]
+
+	result, err := application.GetHttpPanel().GetApiClient(shouldSkipTLSVerify(app.config)).DeleteUser(userUUID)
+	if err != nil {
+		fmt.Println("Failed to delete user:", err)
+		return
+	}
+	fmt.Println(result)
 }

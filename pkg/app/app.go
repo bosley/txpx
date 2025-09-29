@@ -10,6 +10,7 @@ import (
 
 	"github.com/bosley/txpx/pkg/app/internal/api/v1"
 	"github.com/bosley/txpx/pkg/beau"
+	"github.com/bosley/txpx/pkg/datascape"
 	"github.com/bosley/txpx/pkg/events"
 	"github.com/bosley/txpx/pkg/pool"
 	"github.com/bosley/txpx/pkg/procman"
@@ -64,6 +65,8 @@ type AppRuntime interface {
 	GetInsiPanel() AppInsiPanel
 
 	GetEventsPanel() AppEventsPanel
+
+	GetDataControllers() datascape.Controllers
 
 	Launch()
 
@@ -130,6 +133,8 @@ type runtimeImpl struct {
 	sideCarBinder AppExternalBinder
 	cInsi         runtimeInsiConcern
 	cEvents       runtimeEventsConcern
+
+	dataControllers datascape.Controllers
 
 	isPerformingApiTriggeredShutdown atomic.Bool
 	isShuttingDown                   atomic.Bool
@@ -212,7 +217,9 @@ func (r *runtimeSetupImpl) RequireInsi(insi AppInsiBinder) {
 	r.insiBinder = insi
 }
 
-func New(candidate ApplicationCandidate) beau.Optional[AppRuntime] {
+func New(
+	candidate ApplicationCandidate,
+) beau.Optional[AppRuntime] {
 
 	if candidate == nil {
 		return beau.None[AppRuntime]()
@@ -334,6 +341,8 @@ func (r *runtimeImpl) Launch() {
 		installPath: r.installPath,
 	}
 
+	r.dataControllers = datascape.New(r.logger.WithGroup("controllers"))
+
 	if r.cHttp.httpServerBinder != nil {
 		r.internalSetupHttpServer()
 	}
@@ -392,4 +401,8 @@ var _ events.EventHandler = &txHandlerObject{}
 
 func (t *txHandlerObject) OnEvent(event events.Event) {
 	t.app.OnEvent(event)
+}
+
+func (r *runtimeImpl) GetDataControllers() datascape.Controllers {
+	return r.dataControllers
 }

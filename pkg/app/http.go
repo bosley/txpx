@@ -15,6 +15,7 @@ import (
 
 	"github.com/bosley/txpx/pkg/app/internal/api/v1"
 	"github.com/bosley/txpx/pkg/beau"
+	"github.com/bosley/txpx/pkg/datascape"
 	"github.com/bosley/txpx/pkg/security"
 	"github.com/google/uuid"
 )
@@ -37,13 +38,16 @@ type AppHTTPBinder interface {
 	GetBinding() string
 	GetCertPath() string
 	GetKeyPath() string
-	BindPublicRoutes(mux *http.ServeMux)
+	BindPublicRoutes(mux *http.ServeMux, controllers datascape.Controllers)
 }
 
 type ApiClient interface {
 	Ping() error
 	Status() string
 	Shutdown() (string, error)
+	ListUsers() (string, error)
+	CreateUser(email, password string) (string, error)
+	DeleteUser(userUUID string) (string, error)
 }
 
 /*
@@ -158,7 +162,7 @@ func (r *runtimeImpl) internalSetupHttpServer() {
 
 		r.bindRuntimeApi(mux)
 
-		r.cHttp.httpServerBinder.BindPublicRoutes(mux)
+		r.cHttp.httpServerBinder.BindPublicRoutes(mux, r.dataControllers)
 
 		r.cHttp.httpServer = &http.Server{
 			Addr:    r.cHttp.httpServerBinder.GetBinding(),
@@ -293,6 +297,18 @@ func (rt *runtimeImpl) bindRuntimeApi(mux *http.ServeMux) {
 	// to informt he app runtime that it should prepare for shutdown
 	mux.Handle(onRoute("/shutdown"), rt.httpTokenMiddleware(
 		http.HandlerFunc(rt.httpApiHandleRuntimeShutdown),
+	))
+
+	mux.Handle(onRoute("/users/list"), rt.httpTokenMiddleware(
+		http.HandlerFunc(rt.httpApiHandleRuntimeUsersList),
+	))
+
+	mux.Handle(onRoute("/users/create"), rt.httpTokenMiddleware(
+		http.HandlerFunc(rt.httpApiHandleRuntimeUsersCreate),
+	))
+
+	mux.Handle(onRoute("/users/delete"), rt.httpTokenMiddleware(
+		http.HandlerFunc(rt.httpApiHandleRuntimeUsersDelete),
 	))
 }
 
@@ -524,4 +540,176 @@ func (h *httpApiClientImpl) Shutdown() (string, error) {
 	}
 
 	return string(body), nil
+}
+
+func (h *httpApiClientImpl) ListUsers() (string, error) {
+	url := h.makeUrl("/users/list")
+
+	resp, err := h.doFetch(url, "GET", nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("list users failed with status: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.rt.logger.Error("Failed to read list users response body", "error", err)
+		return "", err
+	}
+
+	return string(body), nil
+}
+
+func (h *httpApiClientImpl) CreateUser(email, password string) (string, error) {
+	url := h.makeUrl("/users/create")
+
+	payload := map[string]string{
+		"email":    email,
+		"password": password,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := h.doFetch(url, "POST", strings.NewReader(string(jsonData)))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("create user failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.rt.logger.Error("Failed to read create user response body", "error", err)
+		return "", err
+	}
+
+	return string(body), nil
+}
+
+func (h *httpApiClientImpl) DeleteUser(userUUID string) (string, error) {
+	url := h.makeUrl("/users/delete")
+
+	payload := map[string]string{
+		"user_uuid": userUUID,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := h.doFetch(url, "POST", strings.NewReader(string(jsonData)))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("delete user failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.rt.logger.Error("Failed to read delete user response body", "error", err)
+		return "", err
+	}
+
+	return string(body), nil
+}
+
+func (rt *runtimeImpl) httpApiHandleRuntimeUsersList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	users, err := rt.dataControllers.GetUserController().ListAllUsers()
+	if err != nil {
+		rt.logger.Error("Failed to list users", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(users); err != nil {
+		rt.logger.Error("Failed to encode users list response", "error", err)
+	}
+}
+
+func (rt *runtimeImpl) httpApiHandleRuntimeUsersCreate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		rt.logger.Error("Failed to decode create user request", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if req.Email == "" || req.Password == "" {
+		rt.logger.Error("Missing required fields for user creation")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "email and password are required"})
+		return
+	}
+
+	user, err := rt.dataControllers.GetUserController().CreateUser(req.Email, req.Password)
+	if err != nil {
+		rt.logger.Error("Failed to create user", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(user); err != nil {
+		rt.logger.Error("Failed to encode create user response", "error", err)
+	}
+}
+
+func (rt *runtimeImpl) httpApiHandleRuntimeUsersDelete(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var req struct {
+		UserUUID string `json:"user_uuid"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		rt.logger.Error("Failed to decode delete user request", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if req.UserUUID == "" {
+		rt.logger.Error("Missing user_uuid for user deletion")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "user_uuid is required"})
+		return
+	}
+
+	if err := rt.dataControllers.GetUserController().DeleteUser(req.UserUUID); err != nil {
+		rt.logger.Error("Failed to delete user", "error", err, "user_uuid", req.UserUUID)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "user deleted"})
 }
