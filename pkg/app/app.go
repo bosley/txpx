@@ -62,8 +62,6 @@ type AppRuntime interface {
 
 	GetSideCarPanel() AppSideCarPanel
 
-	GetInsiPanel() AppInsiPanel
-
 	GetEventsPanel() AppEventsPanel
 
 	GetDataControllers() datascape.Controllers
@@ -91,10 +89,6 @@ type AppRuntimeSetup interface {
 
 	RequireSideCar(
 		sideCar AppExternalBinder,
-	)
-
-	RequireInsi(
-		insi AppInsiBinder,
 	)
 
 	ListenOn(topic string, handler events.EventHandler)
@@ -131,7 +125,6 @@ type runtimeImpl struct {
 	cFS           runtimeFSConcern
 	cSideCar      runtimeSideCarConcern
 	sideCarBinder AppExternalBinder
-	cInsi         runtimeInsiConcern
 	cEvents       runtimeEventsConcern
 
 	dataControllers datascape.Controllers
@@ -146,7 +139,6 @@ type runtimeSetupImpl struct {
 	installPath      string
 	httpServerBinder AppHTTPBinder
 	sideCarBinder    AppExternalBinder
-	insiBinder       AppInsiBinder
 	logLevel         slog.Level
 	certPath         string
 	keyPath          string
@@ -211,10 +203,6 @@ func (r *runtimeSetupImpl) RequireHttpServer(binder AppHTTPBinder) {
 
 func (r *runtimeSetupImpl) RequireSideCar(sideCar AppExternalBinder) {
 	r.sideCarBinder = sideCar
-}
-
-func (r *runtimeSetupImpl) RequireInsi(insi AppInsiBinder) {
-	r.insiBinder = insi
 }
 
 func New(
@@ -284,12 +272,6 @@ func New(
 			hostedApps: make(map[string]*procman.HostedApp),
 		},
 		sideCarBinder: rts.sideCarBinder,
-		cInsi: runtimeInsiConcern{
-			insiApiKey:    "",
-			insiEndpoints: nil,
-			logger:        logger.WithGroup("insi"),
-			skipVerify:    false,
-		},
 		cEvents: runtimeEventsConcern{
 			events:       eventsManager,
 			activeTopics: make(map[string]string),
@@ -323,12 +305,6 @@ func New(
 		}
 	}
 
-	if rts.insiBinder != nil {
-		runtimeActual.cInsi.insiApiKey = rts.insiBinder.GetInsiApiKey()
-		runtimeActual.cInsi.insiEndpoints = rts.insiBinder.GetInsiEndpoints()
-		runtimeActual.cInsi.skipVerify = rts.insiBinder.GetInsiSkipVerify()
-	}
-
 	opt := beau.Some(AppRuntime(runtimeActual))
 
 	return opt
@@ -348,9 +324,6 @@ func (r *runtimeImpl) Launch() {
 	}
 	if r.sideCarBinder != nil {
 		r.internalSetupSideCar()
-	}
-	if r.cInsi.insiApiKey != "" && r.cInsi.insiEndpoints != nil {
-		r.internalSetupInsi()
 	}
 	r.candidate.Main(r.ctx, r)
 }

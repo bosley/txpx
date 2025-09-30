@@ -12,10 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	insiConfig "github.com/InsulaLabs/insi/config"
 	"github.com/bosley/txpx/cmd/txpx/assets"
 	"github.com/bosley/txpx/cmd/txpx/config"
-	"github.com/bosley/txpx/internal/insid"
 	"github.com/bosley/txpx/internal/views"
 	"github.com/bosley/txpx/pkg/app"
 	"github.com/bosley/txpx/pkg/events"
@@ -52,14 +50,6 @@ The goal is to make txpx an app to quickly launch and utilize the insi network f
 distributed coordination and web services.
 */
 func main() {
-	// Insi Specific Flags
-	var (
-		usingInsi  = flag.Bool("insi", false, "Run the insi cluster itself.")
-		nodeID     = flag.String("as", "", "Node ID to run as (e.g., node0). Mutually exclusive with --host.")
-		hostAll    = flag.Bool("host", false, "Run instances for all nodes in the config. Mutually exclusive with --as.")
-		configPath = flag.String("config", "", "Path to the cluster configuration file.")
-	)
-
 	// TxPx Specific Flags
 	var (
 		version = flag.Bool("version", false, "Print the version and exit.")
@@ -81,43 +71,7 @@ func main() {
 	*/
 	remainingArgs := flag.Args()
 
-	txpxApp := NewAppTxPx(fmt.Sprintf("txpx-%s", instanceId), *usingInsi, remainingArgs)
-
-	// insi
-	if *usingInsi {
-
-		if *hostAll && *nodeID != "" {
-			color.HiRed("Error: --host and --as flags are mutually exclusive")
-			os.Exit(1)
-		}
-
-		var insidArgs []string
-
-		if *configPath != "" {
-			insidArgs = append(insidArgs, "--config", *configPath)
-		} else {
-			insidArgs = append(insidArgs, "--config", filepath.Join(
-				txpxApp.GetInstallDir(),
-				config.ConfigFileClusterDefault,
-			))
-		}
-
-		if *hostAll {
-			insidArgs = append(insidArgs, "--host")
-		} else if *nodeID != "" {
-			insidArgs = append(insidArgs, "--as", *nodeID)
-		} else {
-			color.HiRed("Error: --host or --as flag is required")
-			os.Exit(1)
-		}
-
-		if txpxApp.config.Prod {
-			insidArgs = append(insidArgs, "--prod")
-		}
-
-		txpxApp.SetupInsidPreLaunch(insidArgs)
-
-	}
+	txpxApp := NewAppTxPx(fmt.Sprintf("txpx-%s", instanceId), remainingArgs)
 
 	opt := app.New(txpxApp)
 
@@ -240,17 +194,13 @@ type AppTxPx struct {
 	httpServer         *AppTxPxHttpServer
 	systemEventHandler *AppTxPxSystemEventHandler
 
-	insidArgs       []string
-	insidController insid.Controller
-	insiCfg         *insiConfig.Cluster
-
 	appArgs []string
 
 	viewManager *views.ViewManager
 }
 
 func NewAppTxPx(
-	identifier string, usingInsi bool, remainingArgs []string) *AppTxPx {
+	identifier string, remainingArgs []string) *AppTxPx {
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -311,23 +261,6 @@ func NewAppTxPx(
 		panic(err)
 	}
 
-	var insiCfg *insiConfig.Cluster
-	if usingInsi {
-		/*
-			This is the insi cluster configuration that the application is hosting.
-			From this we derive the root insi api key for full control of the cluster or
-			node (depending on --host or --as)
-
-			With this insi as a node, we can briddge multiple instances of the application
-			across the insi event system
-		*/
-		cfg, err := insiConfig.LoadConfig(filepath.Join(installDir, config.ConfigFileClusterDefault))
-		if err != nil {
-			panic(err)
-		}
-		insiCfg = cfg
-	}
-
 	return &AppTxPx{
 		appMeta: AppMetaTxPx{
 			identifier: identifier,
@@ -335,13 +268,8 @@ func NewAppTxPx(
 		},
 		config:     appCfg,
 		installDir: installDir,
-		insiCfg:    insiCfg,
 		appArgs:    remainingArgs,
 	}
-}
-
-func (a *AppTxPx) SetupInsidPreLaunch(args []string) {
-	a.insidArgs = args
 }
 
 func (a *AppTxPx) GetInstallDir() string {
@@ -384,17 +312,6 @@ func (a *AppTxPx) Initialize(logger *slog.Logger, rt app.AppRuntimeSetup) error 
 	// kv datastore
 	rt.SetInstallPath(a.installDir)
 
-	// with insi
-	if a.insiCfg != nil {
-		a.logger.Info("setting up insi controller")
-		a.insidController = insid.NewController(
-			a.logger.With("component", "insid"),
-			a.insiCfg,
-			a,
-		)
-		rt.RequireInsi(a.insidController)
-	}
-
 	return nil
 }
 
@@ -411,10 +328,6 @@ func (a *AppTxPx) Main(ctx context.Context, rap app.AppRuntime) {
 		it directly.
 	*/
 	a.httpServer.setApp(a)
-
-	if a.insidController != nil {
-		go a.insidController.Start(a.appCtx, a.insidArgs, 10*time.Second, a.rt)
-	}
 }
 
 func (a *AppTxPx) OnApiEvent(event events.Event) {
@@ -429,35 +342,4 @@ func (a *AppTxPx) OnEvent(event events.Event) {
 		A normal event from somewhere in this app
 	*/
 	a.logger.Info("received event", "event", event)
-}
-
-func (a *AppTxPx) InsidOnline(insiPingData map[string]string) {
-	systemPublisher, err := a.rt.GetEventsPanel().GetTopicPublisher(config.EventTopicTxPxSystem)
-	if err != nil {
-		a.logger.Error("Failed to get system publisher", "error", err)
-		return
-	}
-	systemPublisher.Publish(events.Event{
-		Header: ConstructEventHeader(
-			config.HeaderValImportanceHighest,
-			config.HeaderValThreadOriginTxPxInsi,
-			int(SystemEventIdentifierInsiOnline),
-		),
-		Body: insiPingData,
-	})
-}
-
-func (a *AppTxPx) InsidOffline() {
-	systemPublisher, err := a.rt.GetEventsPanel().GetTopicPublisher(config.EventTopicTxPxSystem)
-	if err != nil {
-		a.logger.Error("Failed to get system publisher", "error", err)
-		return
-	}
-	systemPublisher.Publish(events.Event{
-		Header: ConstructEventHeader(
-			config.HeaderValImportanceHighest,
-			config.HeaderValThreadOriginTxPxInsi,
-			int(SystemEventIdentifierInsiOffline),
-		),
-	})
 }

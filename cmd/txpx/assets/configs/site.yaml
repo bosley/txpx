@@ -1,7 +1,7 @@
 prod: false
 
 domain: "localhost" # defaults to localhost if not provided
-url: "https://example.com" # defaults to https://<domain>
+url: "http://example.com" # defaults to https://<domain>
 port: 8080 # defaults to 8080 if not provided
 
 https: true

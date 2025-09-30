@@ -34,10 +34,15 @@ and they provide this. These function calls MUST be idempotent.
 If the server fails and needs to restart it will recreate the server, so
 the state of the callee of AppHTTPBinder MUST take this into account.
 */
+type TLSConfig struct {
+	Enabled  bool
+	CertPath string
+	KeyPath  string
+}
+
 type AppHTTPBinder interface {
 	GetBinding() string
-	GetCertPath() string
-	GetKeyPath() string
+	GetTLSConfig() TLSConfig
 	BindPublicRoutes(mux *http.ServeMux, controllers datascape.Controllers)
 }
 
@@ -74,6 +79,7 @@ type runtimeHttpConcern struct {
 
 	certPath string
 	keyPath  string
+	useHttps bool
 
 	installDir string
 
@@ -132,7 +138,7 @@ func (r *runtimeHttpConcern) useTLS() (bool, error) {
 		r.certPath != "" && r.keyPath == "" {
 		return false, fmt.Errorf("certPath and keyPath must both be set or both be empty")
 	}
-	return r.certPath != "" && r.keyPath != "", nil
+	return r.certPath != "" && r.keyPath != "" && r.useHttps, nil
 }
 
 func (r *runtimeImpl) GetHttpPanel() AppHttpPanel {
@@ -157,8 +163,12 @@ func (r *runtimeImpl) internalSetupHttpServer() {
 
 		mux := http.NewServeMux()
 
-		r.cHttp.certPath = r.cHttp.httpServerBinder.GetCertPath()
-		r.cHttp.keyPath = r.cHttp.httpServerBinder.GetKeyPath()
+		tlsConfig := r.cHttp.httpServerBinder.GetTLSConfig()
+		if tlsConfig.Enabled {
+			r.cHttp.certPath = tlsConfig.CertPath
+			r.cHttp.keyPath = tlsConfig.KeyPath
+			r.cHttp.useHttps = true
+		}
 
 		r.bindRuntimeApi(mux)
 
@@ -471,8 +481,9 @@ func (h *httpApiClientImpl) doFetch(url string, method string, body io.Reader) (
 
 func (h *httpApiClientImpl) makeUrl(path string) string {
 	binding := h.rt.cHttp.httpServerBinder.GetBinding()
-	keyPathSet := h.rt.cHttp.httpServerBinder.GetKeyPath() != ""
-	certPathSet := h.rt.cHttp.httpServerBinder.GetCertPath() != ""
+	tlsConfig := h.rt.cHttp.httpServerBinder.GetTLSConfig()
+	keyPathSet := tlsConfig.KeyPath != ""
+	certPathSet := tlsConfig.CertPath != ""
 
 	protocol := "http"
 	if keyPathSet && certPathSet {

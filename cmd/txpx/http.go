@@ -76,12 +76,12 @@ func (a *AppTxPxHttpServer) GetBinding() string {
 	return a.binding
 }
 
-func (a *AppTxPxHttpServer) GetCertPath() string {
-	return a.certPath
-}
-
-func (a *AppTxPxHttpServer) GetKeyPath() string {
-	return a.keyPath
+func (a *AppTxPxHttpServer) GetTLSConfig() app.TLSConfig {
+	return app.TLSConfig{
+		Enabled:  a.config.HTTPS,
+		CertPath: a.certPath,
+		KeyPath:  a.keyPath,
+	}
 }
 
 func (a *AppTxPxHttpServer) BindPublicRoutes(mux *http.ServeMux, controllers datascape.Controllers) {
